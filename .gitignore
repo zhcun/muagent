@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target
+**/target
+
+# Generated local run outputs
+/jobs
+/runs
+
+# Local external benchmark harnesses / generated data
+/bench/
+**/__pycache__
+*.py[cod]
+
+# Node/npm local artifacts
+node_modules/
+npm-debug.log*
+*.tgz
+
+# Environment / secrets(不能被 git 追踪)
+.env
+.env.local
+.env.*.local
+*.env.secret
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.iml

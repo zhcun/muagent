@@ -1,0 +1,31 @@
+{
+  "name": "muagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local npm wrapper for the muagent Rust CLI.",
+  "license": "Apache-2.0 OR MIT",
+  "type": "module",
+  "bin": {
+    "muagent": "bin/muagent.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/npm-postinstall.js"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "src",
+    "evals",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "USAGE.md",
+    "CONFIG.md",
+    "DEVELOPMENT.md",
+    "RUN.md",
+    "BUILD.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  }
+}

@@ -1,0 +1,55 @@
+[package]
+name = "muagent"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+rust-version = "1.75"
+authors = ["μAgent contributors"]
+repository = "https://github.com/your-org/muagent"
+
+[lib]
+name = "muagent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "muagent"
+path = "src/bin/muagent.rs"
+
+[[bin]]
+name = "agent_bench"
+path = "evals/agent_bench.rs"
+
+[[bin]]
+name = "muagent-mcp-test-server"
+path = "src/bin/muagent-mcp-test-server.rs"
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "sync", "fs", "io-util", "io-std", "process", "signal"] }
+futures = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+toml = "0.8"
+libc = "0.2"
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+crossterm = "0.28"
+ratatui = "0.29"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[features]
+default = ["testing"]
+testing = []
+
+[profile.min]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
