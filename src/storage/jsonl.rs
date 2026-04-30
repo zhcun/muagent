@@ -4,23 +4,20 @@
 //! - `runs/<run_id>.jsonl`   append-only save-delta records (`RunState` + step events)
 //! - `kv/<session_id>.json`  session-scoped KV map
 //! - `audit/<run_id>.jsonl`  append-only tool audit records
-//! - `.writer.lock`          single-writer lease file
 //!
 //! This keeps the storage model simple and script-readable while still
 //! preserving the step-level persistence contract.
 //!
-//! Important: this backend is intentionally **single-writer**. It enforces
-//! that by creating a root-level lock file on `open()`. A second process (or
-//! a second open in the same process) against the same root fails fast
-//! instead of silently violating the stale-state contract.
+//! Important: this backend intentionally avoids store-root or session lock
+//! files. Multiple processes may open the same root; the append-only run files
+//! are the source of truth, and stale-state checks catch normal sequential
+//! conflicts without leaving crash-stale lock sentinels behind.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
 use crate::core::error::StoreError;
 use crate::core::event::{Event, EventSeq, RunId, SessionId};
@@ -30,14 +27,6 @@ use crate::core::store::{AuditFilter, SessionStore, ToolAuditRecord};
 
 pub struct JsonlSessionStore {
     root: PathBuf,
-    _writer_lock: WriterLock,
-    io_lock: Mutex<()>,
-}
-
-struct WriterLock {
-    path: PathBuf,
-    #[allow(dead_code)]
-    file: std::fs::File,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,12 +54,7 @@ impl JsonlSessionStore {
         tokio::fs::create_dir_all(root.join("audit"))
             .await
             .map_err(io_err)?;
-        let writer_lock = WriterLock::acquire(&root)?;
-        Ok(Self {
-            root,
-            _writer_lock: writer_lock,
-            io_lock: Mutex::new(()),
-        })
+        Ok(Self { root })
     }
 
     fn run_path(&self, run_id: RunId) -> PathBuf {
@@ -118,43 +102,9 @@ impl JsonlSessionStore {
     }
 }
 
-impl WriterLock {
-    fn acquire(root: &Path) -> Result<Self, StoreError> {
-        let path = root.join(".writer.lock");
-        let mut file = match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(StoreError::Transient(format!(
-                    "jsonl store root `{}` is already open for writing; remove `{}` if the previous writer crashed",
-                    root.display(),
-                    path.display()
-                )));
-            }
-            Err(e) => return Err(io_err(e)),
-        };
-
-        let _ = writeln!(file, "pid={} root={}", std::process::id(), root.display());
-        let _ = file.flush();
-
-        Ok(Self { path, file })
-    }
-}
-
-impl Drop for WriterLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 #[async_trait]
 impl SessionStore for JsonlSessionStore {
     async fn save_delta(&self, state: &RunState, events: &[Event]) -> Result<(), StoreError> {
-        let _guard = self.io_lock.lock().await;
-
         let existing = self.read_last_record(state.run_id).await?;
         if let Some(prev) = &existing {
             let expected_base = state.event_seq.saturating_sub(events.len() as u64);
@@ -180,7 +130,6 @@ impl SessionStore for JsonlSessionStore {
     }
 
     async fn load_run(&self, id: RunId) -> Result<Option<RunState>, StoreError> {
-        let _guard = self.io_lock.lock().await;
         Ok(self.read_last_record(id).await?.map(|r| {
             let mut state = r.state;
             state.ensure_history_ids();
@@ -189,8 +138,6 @@ impl SessionStore for JsonlSessionStore {
     }
 
     async fn list_runs(&self, filter: RunFilter) -> Result<Vec<RunHeader>, StoreError> {
-        let _guard = self.io_lock.lock().await;
-
         let mut dir = tokio::fs::read_dir(self.root.join("runs"))
             .await
             .map_err(io_err)?;
@@ -232,7 +179,6 @@ impl SessionStore for JsonlSessionStore {
     }
 
     async fn delete_run(&self, id: RunId) -> Result<(), StoreError> {
-        let _guard = self.io_lock.lock().await;
         for path in [self.run_path(id), self.audit_path(id)] {
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {}
@@ -248,7 +194,6 @@ impl SessionStore for JsonlSessionStore {
         run_id: RunId,
         since_seq: EventSeq,
     ) -> Result<Vec<Event>, StoreError> {
-        let _guard = self.io_lock.lock().await;
         let records = self.read_run_records(run_id).await?;
         let mut dedup: BTreeMap<EventSeq, Event> = BTreeMap::new();
         for record in records {
@@ -267,7 +212,6 @@ impl SessionStore for JsonlSessionStore {
         session_id: SessionId,
         key: &str,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let _guard = self.io_lock.lock().await;
         let map = self.read_kv_map(session_id).await?;
         match map.get(key) {
             Some(entry) => {
@@ -285,7 +229,6 @@ impl SessionStore for JsonlSessionStore {
         key: &str,
         value: &[u8],
     ) -> Result<(), StoreError> {
-        let _guard = self.io_lock.lock().await;
         let mut map = self.read_kv_map(session_id).await?;
         map.insert(
             key.to_string(),
@@ -302,7 +245,6 @@ impl SessionStore for JsonlSessionStore {
         session_id: SessionId,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let _guard = self.io_lock.lock().await;
         let map = self.read_kv_map(session_id).await?;
         let mut out = Vec::new();
         for (key, value) in map {
@@ -319,7 +261,6 @@ impl SessionStore for JsonlSessionStore {
     }
 
     async fn record_tool_audit(&self, rec: &ToolAuditRecord) -> Result<(), StoreError> {
-        let _guard = self.io_lock.lock().await;
         append_jsonl(&self.audit_path(rec.run_id), rec).await
     }
 
@@ -327,8 +268,6 @@ impl SessionStore for JsonlSessionStore {
         &self,
         filter: &AuditFilter,
     ) -> Result<Vec<ToolAuditRecord>, StoreError> {
-        let _guard = self.io_lock.lock().await;
-
         let mut dir = tokio::fs::read_dir(self.root.join("audit"))
             .await
             .map_err(io_err)?;

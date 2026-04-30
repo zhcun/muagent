@@ -245,24 +245,47 @@ async fn jsonl_optimistic_concurrency_stale() {
 }
 
 #[tokio::test]
-async fn jsonl_store_rejects_second_writer_for_same_root() {
+async fn jsonl_store_allows_multiple_handles_for_same_root() {
+    let root = temp_store_root();
+
+    std::fs::write(root.join(".writer.lock"), b"stale lock from older muagent").unwrap();
+
+    let first = JsonlSessionStore::open(&root).await.unwrap();
+    let second = JsonlSessionStore::open(&root).await.unwrap();
+
+    let mut state = new_state();
+    let run_id = state.run_id;
+    state.step = Step::Done {
+        final_text: "shared root".into(),
+    };
+    first.save_delta(&state, &[]).await.unwrap();
+
+    let loaded = second.load_run(run_id).await.unwrap().expect("found");
+    assert_eq!(loaded.run_id, run_id);
+    assert!(root.join(".writer.lock").exists());
+}
+
+#[tokio::test]
+async fn jsonl_same_run_stale_state_is_detected_across_handles() {
     let root = temp_store_root();
 
     let first = JsonlSessionStore::open(&root).await.unwrap();
-    let err = match JsonlSessionStore::open(&root).await {
-        Ok(_) => panic!("expected second writer to be rejected"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string().contains("already open for writing"),
-        "unexpected error: {err}"
-    );
+    let second = JsonlSessionStore::open(&root).await.unwrap();
 
-    drop(first);
+    let mut fresh = new_state();
+    fresh.event_seq = 5;
+    first.save_delta(&fresh, &[]).await.unwrap();
 
-    JsonlSessionStore::open(&root)
-        .await
-        .expect("lock file should be released on drop");
+    let mut stale = fresh.clone();
+    stale.event_seq = 3;
+    let err = second.save_delta(&stale, &[]).await.unwrap_err();
+    match err {
+        muagent::core::error::StoreError::StaleState { expected, actual } => {
+            assert_eq!(expected, 3);
+            assert_eq!(actual, 5);
+        }
+        e => panic!("expected StaleState, got {e:?}"),
+    }
 }
 
 #[allow(dead_code)]
