@@ -5,6 +5,20 @@
 
 ## 安装 CLI
 
+前置要求:
+
+- Node.js 16+
+- Rust/Cargo 1.75+
+
+如果机器还没有 Rust/Cargo, 先安装 Rust toolchain:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+cargo --version
+rustc --version
+```
+
 从当前仓库安装到本机:
 
 ```bash

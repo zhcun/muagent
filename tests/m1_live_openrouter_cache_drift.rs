@@ -17,7 +17,7 @@
 //!
 //! Conclusion (for OpenAI / OpenRouter): per-turn data only kills cache
 //! if it lives **inside** a message that is otherwise cacheable. Putting
-//! it as a separate message — which is exactly what sagent does for L2
+//! it as a separate message — which is exactly what muagent does for L2
 //! `runtime_context` — does not break history caching for OpenAI.
 //!
 //! Anthropic, by contrast, advertises strict byte-prefix matching with
@@ -308,7 +308,7 @@ async fn dynamic_prefix_string_collapses_history_cache() {
          per-message, not as a strict cumulative byte prefix. Compare with\n\
          `dynamic_inside_system_text_probe`: when the changing string is\n\
          concatenated INTO the system text itself, cache_read flatlines.\n\
-         Implication: for OpenAI, sagent's L2 runtime_context as a separate\n\
+         Implication: for OpenAI, muagent's L2 runtime_context as a separate\n\
          message is fine; the cache killer would only be per-turn data\n\
          leaking INSIDE a single cacheable message's text.",
         reads, prompts

@@ -11,7 +11,7 @@ rustc --version      # 期望 >= 1.75
 ## 编译 + 跑测试
 
 ```bash
-cd /Users/mike/jiang/sagent
+cd /Users/mike/jiang/muagent
 cargo build
 cargo test
 ```
@@ -30,7 +30,7 @@ cargo test -p muagent --test m0_shell t6_panic_becomes_tool_result
 ## 当前目录布局
 
 ```
-sagent/
+muagent/
 ├── Cargo.toml                             # 主 crate: muagent
 ├── src/
 │   ├── lib.rs                             # 模块导出 + prelude

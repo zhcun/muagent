@@ -6,7 +6,7 @@
 //! turn so we can read off exactly which structural choice costs which
 //! tokens.
 //!
-//! - **A. sagent-current**: system stable, L2 = "current_date_utc: ..." (byte-
+//! - **A. muagent-current**: system stable, L2 = "current_date_utc: ..." (byte-
 //!   stable within day, but separate uncached system message), tools sorted,
 //!   `prompt_cache_key` = a fixed session-equivalent string.
 //! - **B. no-L2**: same as A but `runtime_context` is empty. Tests whether
@@ -150,7 +150,7 @@ async fn quantify_remaining_uncached_tokens() {
 
     eprintln!("== model={model} ==");
 
-    // ---- A: current sagent (L2 byte-stable, prompt_cache_key = "session" ish) ----
+    // ---- A: current muagent (L2 byte-stable, prompt_cache_key = "session" ish) ----
     let mut history = fresh_history();
     let mut prompts = Vec::new();
     let mut reads = Vec::new();

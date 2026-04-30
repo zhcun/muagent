@@ -46,7 +46,7 @@ scheme ":" "//" [ root-id ] "/" path
 例:
   sandbox://notes/2026-04-21.md
   bookmark://7F3A-21B0/Downloads/report.pdf
-  file:///home/mike/jiang/sagent/Cargo.toml
+  file:///home/mike/jiang/muagent/Cargo.toml
   saf://content%3A%2F%2Fcom.android.externalstorage.documents%2Ftree%2Fprimary%253A.../docs/a.md
   flash://main/config.json
 ```

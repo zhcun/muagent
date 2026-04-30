@@ -1,4 +1,4 @@
-//! Live A/B: sagent's current "rebuild L2 every turn" orchestration vs the
+//! Live A/B: muagent's current "rebuild L2 every turn" orchestration vs the
 //! Codex-style "bake env once, diff-only afterwards" orchestration.
 //!
 //! Both run against `openai/gpt-5.4-nano` via OpenRouter and report
@@ -114,10 +114,10 @@ fn codex_style_env_message() -> Message {
     }
 }
 
-/// Sagent-current style: rebuild a runtime_context block every turn with a
+/// Muagent-current style: rebuild a runtime_context block every turn with a
 /// per-turn `turn: N` line. Returned as a string the adapter will emit as
 /// a SECOND system message (per current OpenAI adapter wiring).
-fn sagent_runtime_context(turn: u32) -> String {
+fn muagent_runtime_context(turn: u32) -> String {
     format!("## Runtime context\ncurrent_date_utc: 2026-04-27\nturn: {turn}\n")
 }
 
@@ -142,14 +142,14 @@ async fn run_turn(
     reply.usage
 }
 
-/// **A: Sagent-current orchestration.** Every turn:
+/// **A: Muagent-current orchestration.** Every turn:
 ///   - system (stable)
 ///   - runtime_context = "...turn: N..."  (per-turn-changing, separate
 ///     system message in wire body)
 ///   - history: append-only (no env baked in)
 #[ignore = "hits real OpenRouter API; run with --ignored --nocapture"]
 #[tokio::test]
-async fn a_sagent_current_pattern() {
+async fn a_muagent_current_pattern() {
     let (key, base, model) = load_env();
     let net = Arc::new(ReqwestEgress::new().expect("reqwest egress"));
     let adapter = OpenAiAdapter::new(net, &base, &model, Some(key));
@@ -159,7 +159,7 @@ async fn a_sagent_current_pattern() {
     let mut prompts = Vec::new();
     let mut reads = Vec::new();
     eprintln!(
-        "== A: sagent-current == system_chars={} model={model}",
+        "== A: muagent-current == system_chars={} model={model}",
         system.len()
     );
     for turn in 1u32..=5 {
@@ -168,7 +168,7 @@ async fn a_sagent_current_pattern() {
         current.push(Message::User {
             content: Content::text(format!("Turn {turn} probe — reply OK.")),
         });
-        let usage = run_turn(&adapter, &system, &sagent_runtime_context(turn), current).await;
+        let usage = run_turn(&adapter, &system, &muagent_runtime_context(turn), current).await;
         prompts.push(usage.prompt_tokens);
         reads.push(usage.cache_read_tokens);
         eprintln!(

@@ -76,7 +76,7 @@ make linux-x86   # x86_64-unknown-linux-musl
 ## 目录结构
 
 ```text
-sagent/
+muagent/
 ├── Cargo.toml
 ├── package.json
 ├── src/
