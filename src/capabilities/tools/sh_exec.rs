@@ -1,7 +1,7 @@
-//! `sh.exec`:允许名单内的 shell 命令。只在 bundle 有 ProcessExec adapter 时可注册。
+//! `sh.exec`:运行 shell 命令。只在 bundle 有 ProcessExec adapter 时可注册。
 //!
 //! 参数:
-//! - `bin` (string, required):必须在 allowlist 内
+//! - `bin` (string, required):binary 名称或路径
 //! - `args` (array of strings, optional)
 //! - `stdin` (string, optional)
 //! - `timeout_ms` (integer, optional, default 30000)
@@ -100,7 +100,7 @@ impl ShExec {
     pub fn new(bundle: Arc<AdapterBundle>) -> Self {
         let desc = ToolDescriptor {
             name: "sh_exec".into(),
-            description: "Execute an allowlisted shell binary. BLOCKS until process \
+            description: "Execute a shell binary. BLOCKS until process \
                  exits or timeout_ms fires (whichever is first); on timeout \
                  the process is killed with SIGKILL. \
                  For multi-line shell scripts or commands with complex \
@@ -129,9 +129,9 @@ impl ShExec {
             schema_json: json!({
                 "type":"object",
                 "properties": {
-                    "bin":   {"type":"string","description":"Binary name (must be on the session allowlist)."},
+                    "bin":   {"type":"string","description":"Binary name or path to execute."},
                     "args":  {"type":"array","items":{"type":"string"},"default":[],
-                              "description":"Simple argv values for the allowlisted binary. For shell scripts or heredocs, prefer stdin."},
+                              "description":"Simple argv values for the binary. For shell scripts or heredocs, prefer stdin."},
                     "stdin": {"type":"string","description":"Optional stdin payload; process's stdin closes after. Prefer this for multi-line shell scripts."},
                     "timeout_ms":{"type":"integer","minimum":1,"default":30000,
                                   "description":"In mode=auto, wait this many ms before returning a background job_id if still running. In action=wait, omit this to use adaptive backoff, or pass the recommended_wait_ms from the previous running result. In mode=sync, kill after this many ms."},
@@ -175,8 +175,8 @@ impl Tool for ShExec {
                 }
             }
         };
-        // Adapter-level allowlist runs inside ProcessExec::run; guard only
-        // does cheap pure checks.
+        // Guard only does cheap pure checks; execution errors are reported by
+        // the ProcessExec adapter.
         if a.action.is_some() && !a.job_id.as_deref().unwrap_or_default().is_empty() {
             return GuardOutcome::Allow;
         }
@@ -206,20 +206,14 @@ impl Tool for ShExec {
             let job_id = a.job_id.as_deref().unwrap_or_default();
             return match action {
                 "poll" => {
-                    let snap = proc
-                        .poll(job_id)
-                        .await
-                        .map_err(|e| map_exec_err(e, "job", proc.as_ref()))?;
+                    let snap = proc.poll(job_id).await.map_err(map_exec_err)?;
                     Ok(snapshot_ok(snap))
                 }
                 "wait" => {
                     let wait_ms = match a.timeout_ms {
                         Some(wait_ms) => wait_ms,
                         None => {
-                            let snap = proc
-                                .poll(job_id)
-                                .await
-                                .map_err(|e| map_exec_err(e, "job", proc.as_ref()))?;
+                            let snap = proc.poll(job_id).await.map_err(map_exec_err)?;
                             if snap.state != crate::adapters::ExecJobState::Running {
                                 return Ok(snapshot_ok(snap));
                             }
@@ -230,10 +224,7 @@ impl Tool for ShExec {
                     Ok(snapshot_ok(snap))
                 }
                 "kill" => {
-                    let snap = proc
-                        .kill(job_id)
-                        .await
-                        .map_err(|e| map_exec_err(e, "job", proc.as_ref()))?;
+                    let snap = proc.kill(job_id).await.map_err(map_exec_err)?;
                     Ok(snapshot_ok(snap))
                 }
                 other => Err(ToolErr::deny(format!("unknown sh_exec action `{other}`"))
@@ -250,10 +241,7 @@ impl Tool for ShExec {
         let mode = a.mode.as_deref().unwrap_or("auto");
         if mode == "sync" {
             spec.timeout = Duration::from_millis(a.timeout_ms.unwrap_or_else(default_timeout_ms));
-            let out = proc
-                .run(&spec, cancel)
-                .await
-                .map_err(|e| map_exec_err(e, bin, proc.as_ref()))?;
+            let out = proc.run(&spec, cancel).await.map_err(map_exec_err)?;
             return Ok(exit_ok(out));
         }
 
@@ -263,10 +251,7 @@ impl Tool for ShExec {
             .background_after_ms
             .or(a.timeout_ms)
             .unwrap_or_else(default_timeout_ms);
-        let snap = proc
-            .spawn(&spec)
-            .await
-            .map_err(|e| map_exec_err(e, bin, proc.as_ref()))?;
+        let snap = proc.spawn(&spec).await.map_err(map_exec_err)?;
         let snap = wait_for_job(proc.as_ref(), &snap.job_id, foreground_ms, cancel).await?;
         if snap.state == crate::adapters::ExecJobState::Running {
             return Ok(snapshot_ok(snap));
@@ -389,22 +374,9 @@ fn first_file_root_path(bundle: &AdapterBundle) -> Option<String> {
     })
 }
 
-fn map_exec_err(
-    e: crate::adapters::ExecErr,
-    bin: &str,
-    proc: &dyn crate::adapters::ProcessExec,
-) -> ToolErr {
+fn map_exec_err(e: crate::adapters::ExecErr) -> ToolErr {
     use crate::adapters::ExecErr::*;
     match e {
-        NotAllowed => {
-            let allow = proc.allowlist();
-            let hint = if allow.is_empty() {
-                "shell execution is disabled in this session (no binaries allowlisted)".to_string()
-            } else {
-                format!("allowed binaries: {}", allow.join(", "))
-            };
-            ToolErr::deny(format!("shell binary `{bin}` is not in the allowlist")).with_hint(hint)
-        }
         NotAvailable => ToolErr::deny("sh.exec not available on this platform"),
         Timeout => ToolErr::retry("timeout").with_hint("try smaller input or longer timeout_ms"),
         Killed => ToolErr::retry("killed"),

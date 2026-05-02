@@ -186,7 +186,7 @@ disabled = ["marketing-ideas"]
 
 [fs]
 root = "."
-allow_sh = ["sh", "bash", "python3", "cargo"]
+# sh_exec 默认注册; 如需关闭, 在 tools.disabled 中加入 "sh_exec"。
 
 [compaction]
 max_tokens = 156000

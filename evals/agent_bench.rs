@@ -189,7 +189,6 @@ struct PreparedTask {
     name: &'static str,
     workdir: PathBuf,
     roots: Vec<PathBuf>,
-    sh_allowlist: Vec<String>,
     turns: Vec<TurnSpec>,
     final_check: Option<FinalCheck>,
 }
@@ -922,8 +921,6 @@ fn build_cli_args(
     argv.push(format!("jsonl:{}", store_dir.display()));
     argv.push("--root".into());
     argv.push(root.display().to_string());
-    argv.push("--allow-sh".into());
-    argv.push(task.sh_allowlist.join(","));
     Ok(argv)
 }
 
@@ -1371,7 +1368,6 @@ fn prepare_fs_roundtrip_exact() -> Result<PreparedTask, String> {
         name: "fs_roundtrip_exact",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Write the exact text `{expected}` to {}. Then read the file back and return only the file contents.",
@@ -1417,7 +1413,6 @@ fn prepare_invoice_total_nested() -> Result<PreparedTask, String> {
         name: "invoice_total_nested",
         workdir: workdir.clone(),
         roots: vec![workdir.clone()],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Inside {} there are JSON invoice files in nested folders. Compute the total `amount` for every invoice whose `status` is `paid`. Return only the integer total.",
@@ -1454,7 +1449,6 @@ fn prepare_log_error_count() -> Result<PreparedTask, String> {
         name: "log_error_count",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec!["sh".into()],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Count how many lines in {} contain the exact uppercase substring `ERROR`. Return only the integer count.",
@@ -1486,7 +1480,6 @@ south,130,15\n";
         name: "csv_best_region",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec!["sh".into()],
         turns: vec![TurnSpec {
             prompt: format!(
                 "In {} each row has region,revenue,refunds. Compute each region's total net revenue where net = revenue - refunds. Return only the region with the highest total net revenue.",
@@ -1514,7 +1507,6 @@ fn prepare_two_turn_contact_memory() -> Result<PreparedTask, String> {
         name: "two_turn_contact_memory",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![
             TurnSpec {
                 prompt: format!(
@@ -1550,7 +1542,6 @@ fn prepare_project_owner_lookup() -> Result<PreparedTask, String> {
         name: "project_owner_lookup",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Read {} and return only the owner of the project named `cinder`.",
@@ -1580,7 +1571,6 @@ fn prepare_pending_bug_count() -> Result<PreparedTask, String> {
         name: "pending_bug_count",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Count how many entries in {} have `kind` = `bug` and `status` = `open`. Return only the integer count.",
@@ -1618,7 +1608,6 @@ Text
         name: "markdown_heading_count",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec!["sh".into()],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Count the markdown headings in {} that start with the exact prefix `## `. Return only the integer count.",
@@ -1650,7 +1639,6 @@ env:
         name: "yaml_prod_port",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Read {} and return only the prod port value.",
@@ -1679,7 +1667,6 @@ fn prepare_rename_report_file() -> Result<PreparedTask, String> {
         name: "rename_report_file",
         workdir: workdir.clone(),
         roots: vec![workdir.clone()],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Rename {} to {}. After renaming, return only the destination path's filename.",
@@ -1714,7 +1701,6 @@ fn prepare_delete_stale_file() -> Result<PreparedTask, String> {
         name: "delete_stale_file",
         workdir: workdir.clone(),
         roots: vec![workdir.clone()],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Delete {}. Then count how many files remain in {} and return only that integer.",
@@ -1745,7 +1731,6 @@ fn prepare_inventory_restock_count() -> Result<PreparedTask, String> {
         name: "inventory_restock_count",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Read {} and count how many items have `stock` strictly less than `reorder_level`. Return only the integer count.",
@@ -1791,7 +1776,6 @@ fn prepare_expenses_q2_total() -> Result<PreparedTask, String> {
         name: "expenses_q2_total",
         workdir: workdir.clone(),
         roots: vec![workdir.clone()],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Inside {} there are expense JSON files. Sum `amount` only for files where `quarter` is `Q2` and `approved` is true. Return only the integer total.",
@@ -1820,7 +1804,6 @@ zoe\t312\n";
         name: "tsv_fastest_runner",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec!["sh".into()],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Read {} and return only the name with the smallest `seconds` value.",
@@ -1849,7 +1832,6 @@ fn prepare_latest_release_channel() -> Result<PreparedTask, String> {
         name: "latest_release_channel",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Read {}. Among entries where `stable` is true, find the newest version and return only its `channel` value.",
@@ -1877,7 +1859,6 @@ fn prepare_two_turn_project_memory() -> Result<PreparedTask, String> {
         name: "two_turn_project_memory",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![
             TurnSpec {
                 prompt: format!(
@@ -1916,7 +1897,6 @@ fn prepare_todo_note_count() -> Result<PreparedTask, String> {
         name: "todo_note_count",
         workdir: workdir.clone(),
         roots: vec![workdir.clone()],
-        sh_allowlist: vec!["sh".into()],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Inside {} there are markdown notes. Count how many `.md` files contain the exact tag `#todo`. Return only the integer count.",
@@ -1945,7 +1925,6 @@ date,title\n\
         name: "earliest_event_title",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec!["sh".into()],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Read {} and return only the title of the earliest date.",
@@ -1974,7 +1953,6 @@ fn prepare_enabled_flag_highest_rollout() -> Result<PreparedTask, String> {
         name: "enabled_flag_highest_rollout",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Read {} and return only the `name` of the enabled flag with the highest `rollout` value.",
@@ -2006,7 +1984,6 @@ fn prepare_nested_markdown_file_count() -> Result<PreparedTask, String> {
         name: "nested_markdown_file_count",
         workdir: workdir.clone(),
         roots: vec![workdir.clone()],
-        sh_allowlist: vec!["sh".into()],
         turns: vec![TurnSpec {
             prompt: format!(
                 "Count how many files under {} have the `.md` extension, recursively. Return only the integer count.",
@@ -2030,7 +2007,6 @@ fn prepare_image_direct_text() -> Result<PreparedTask, String> {
         name: "image_direct_text",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec {
             prompt: "The attached PNG screenshot contains one uppercase label. Return only the exact text shown in the image, with no spaces.".into(),
             expected: "TEXT".into(),
@@ -2051,7 +2027,6 @@ fn prepare_image_fs_read_text() -> Result<PreparedTask, String> {
         name: "image_fs_read_text",
         workdir: workdir.clone(),
         roots: vec![workdir],
-        sh_allowlist: vec![],
         turns: vec![TurnSpec::text(
             format!(
                 "Call fs_read on the PNG screenshot at {} without force_text (omit force_text or set it to false). fs_read will attach the image for visual inspection; inspect that returned image attachment. Return only the exact uppercase text shown in the image, with no spaces.",

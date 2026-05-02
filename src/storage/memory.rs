@@ -119,6 +119,7 @@ impl SessionStore for MemorySessionStore {
             .map(|r| RunHeader {
                 run_id: r.run_id,
                 session_id: r.session_id,
+                workspace_root: r.workspace_root.clone(),
                 parent_run_id: r.parent_run_id,
                 title: None,
                 status: status_from_step(&r.step),

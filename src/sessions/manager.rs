@@ -34,27 +34,33 @@ impl SessionManager {
         let runs = self.store.list_runs(RunFilter::default()).await?;
 
         // Aggregate runs per session
-        let mut by_sid: std::collections::HashMap<SessionId, (u32, i64, RunStatus)> =
-            std::collections::HashMap::new();
+        let mut by_sid: std::collections::HashMap<
+            SessionId,
+            (u32, i64, RunStatus, Option<String>),
+        > = std::collections::HashMap::new();
         for r in runs {
             let entry = by_sid
                 .entry(r.session_id)
-                .or_insert((0, 0, RunStatus::Active));
+                .or_insert((0, 0, RunStatus::Active, None));
             entry.0 += 1;
             if r.updated_ms > entry.1 {
                 entry.1 = r.updated_ms;
                 entry.2 = r.status;
+                entry.3 = r.workspace_root;
             }
         }
         let mut out: Vec<SessionInfo> = by_sid
             .into_iter()
             .map(
-                |(session_id, (run_count, updated_ms, latest_status))| SessionInfo {
-                    session_id,
-                    run_count,
-                    updated_ms,
-                    latest_status,
-                    title: None,
+                |(session_id, (run_count, updated_ms, latest_status, workspace_root))| {
+                    SessionInfo {
+                        session_id,
+                        run_count,
+                        updated_ms,
+                        latest_status,
+                        workspace_root,
+                        title: None,
+                    }
                 },
             )
             .collect();
@@ -81,6 +87,19 @@ impl SessionManager {
         Ok(rs)
     }
 
+    pub async fn list_sessions_for_workspace(
+        &self,
+        workspace_root: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<SessionInfo>, StoreError> {
+        let mut sessions = self.list_sessions(None).await?;
+        sessions.retain(|s| s.workspace_root.as_deref() == Some(workspace_root));
+        if let Some(limit) = limit {
+            sessions.truncate(limit);
+        }
+        Ok(sessions)
+    }
+
     /// 继续已有 session:取其最后一个 run 的 history,开新 run。返回的 RunState 是"空 step"(Ready)。
     pub async fn continue_session(
         &self,
@@ -103,6 +122,7 @@ impl SessionManager {
 
         let mut next = RunState::new(uuid::Uuid::new_v4(), session_id, now_ms);
         next.parent_run_id = Some(last.run_id);
+        next.workspace_root = prev.workspace_root.clone();
         prev.ensure_history_ids();
         next.history = prev.history; // inherit full transcript
         next.history_ids = prev.history_ids;
@@ -131,6 +151,7 @@ impl SessionManager {
 
         let mut next = RunState::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), now_ms);
         next.parent_run_id = Some(run_id);
+        next.workspace_root = prev.workspace_root.clone();
         next.history = prev.history[..cut].to_vec();
         next.history_ids = prev.history_ids[..cut].to_vec();
         next.next_message_seq = prev.next_message_seq;
@@ -296,6 +317,7 @@ pub struct SessionInfo {
     pub run_count: u32,
     pub updated_ms: i64,
     pub latest_status: RunStatus,
+    pub workspace_root: Option<String>,
     pub title: Option<String>,
 }
 

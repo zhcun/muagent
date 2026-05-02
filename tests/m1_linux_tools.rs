@@ -291,7 +291,7 @@ async fn m1_fs_write_escape_root_denied() {
 async fn m1_sh_exec_echo() {
     let tmp = tempdir();
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
-    let proc = Arc::new(LinuxProcessExec::new(vec!["echo".into()]));
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
     let registry = Arc::new(CapabilityRegistry::new());
     muagent::capabilities::tools::register_defaults(&registry, bundle);
@@ -323,7 +323,7 @@ async fn m1_sh_exec_echo() {
 async fn m1_sh_exec_nonzero_exit_is_still_tool_output() {
     let tmp = tempdir();
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
-    let proc = Arc::new(LinuxProcessExec::new(vec!["sh".into()]));
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
     let registry = Arc::new(CapabilityRegistry::new());
     muagent::capabilities::tools::register_defaults(&registry, bundle);
@@ -350,13 +350,13 @@ async fn m1_sh_exec_nonzero_exit_is_still_tool_output() {
     let _ = std::fs::remove_dir(&tmp);
 }
 
-// -------- Test 4:sh.exec 不在 allowlist → err --------
+// -------- Test 4:sh.exec runs any PATH binary --------
 
 #[tokio::test]
-async fn m1_sh_exec_not_in_allowlist() {
+async fn m1_sh_exec_runs_path_binary() {
     let tmp = tempdir();
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
-    let proc = Arc::new(LinuxProcessExec::new(vec!["echo".into()])); // no "rm"
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
     let registry = Arc::new(CapabilityRegistry::new());
     muagent::capabilities::tools::register_defaults(&registry, bundle);
@@ -366,17 +366,16 @@ async fn m1_sh_exec_not_in_allowlist() {
         "s2",
         "sh_exec",
         json!({
-            "bin": "rm",
-            "args": ["-rf", "/tmp/anything"],
+            "bin": "echo",
+            "args": ["shell", "is", "unrestricted"],
         }),
     );
     let r = executor
         .execute(&c, &ToolContext::ephemeral(), CancelToken::never())
         .await
         .unwrap();
-    assert!(!r.ok);
-    assert!(!r.retryable);
-    assert!(r.text().contains("allowlist"));
+    assert!(r.ok, "{:?}", r);
+    assert!(r.text().contains("shell is unrestricted"));
 
     let _ = std::fs::remove_dir(&tmp);
 }

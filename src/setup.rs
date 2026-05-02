@@ -20,22 +20,20 @@ use crate::storage::MemorySessionStore;
 use crate::config::{Config, ModelCapabilityOverrides, ModelConfig, Provider, StoreConfig};
 
 pub struct Wired {
-    pub runner: Runner,
+    pub runner: Arc<Runner>,
     pub skills: Arc<SkillManager>,
     pub sessions: SessionManager,
+    pub adapters: Arc<AdapterBundle>,
 }
 
 pub async fn wire(cfg: &Config) -> Result<Wired, String> {
     let model_net = Arc::new(ReqwestEgress::new().map_err(|e| format!("net init: {e:?}"))?);
     let model = build_model_adapter(&cfg.model, model_net.clone())?;
 
-    // Adapter bundle: fs root + optional sh allowlist + optional agent HTTP.
+    // Adapter bundle: fs root + shell process execution + optional agent HTTP.
     let fs = Arc::new(LinuxFileSystem::new(vec![cfg.fs.root.clone()]));
-    let mut builder = AdapterBundle::builder().fs(fs);
-    if !cfg.fs.sh_allowlist.is_empty() {
-        let proc = Arc::new(LinuxProcessExec::new(cfg.fs.sh_allowlist.clone()));
-        builder = builder.proc(proc);
-    }
+    let proc = Arc::new(LinuxProcessExec::new());
+    let mut builder = AdapterBundle::builder().fs(fs).proc(proc);
     if cfg.net_http.enabled {
         let tool_net = Arc::new(ReqwestEgress::new().map_err(|e| format!("tool net init: {e:?}"))?);
         builder = builder.net(tool_net);
@@ -193,9 +191,10 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
         .map_err(|e| format!("build runner: {e:?}"))?;
 
     Ok(Wired {
-        runner,
+        runner: Arc::new(runner),
         skills,
         sessions,
+        adapters: bundle,
     })
 }
 
@@ -219,15 +218,10 @@ fn system_prompt(cfg: &Config) -> String {
         std::env::consts::ARCH
     ));
     s.push_str(&format!("- Filesystem root: {}\n", cfg.fs.root.display()));
-    if !cfg.fs.sh_allowlist.is_empty() {
-        s.push_str(&format!(
-            "- Shell commands available (allowlist): {}. \
-             sh_exec accepts only these exact commands, not substitutes.\n",
-            cfg.fs.sh_allowlist.join(", ")
-        ));
-    } else {
-        s.push_str("- Shell execution: disabled.\n");
-    }
+    s.push_str(
+        "- Shell execution: enabled. sh_exec can run binaries available on PATH \
+         from the filesystem root.\n",
+    );
     if cfg.net_http.enabled {
         s.push_str("- HTTP tool: enabled.\n");
     } else {

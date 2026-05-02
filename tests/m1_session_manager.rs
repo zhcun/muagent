@@ -57,6 +57,37 @@ async fn session_list_aggregates_runs() {
 }
 
 #[tokio::test]
+async fn session_list_filters_by_workspace_root() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let mgr = SessionManager::new(store.clone());
+
+    let s1 = mgr.new_session();
+    let s2 = mgr.new_session();
+
+    let mut r1 = state(s1);
+    r1.workspace_root = Some("/repo/a".into());
+    r1.step = Step::Done {
+        final_text: "a".into(),
+    };
+    store.save_delta(&r1, &[]).await.unwrap();
+
+    let mut r2 = state(s2);
+    r2.workspace_root = Some("/repo/b".into());
+    r2.step = Step::Done {
+        final_text: "b".into(),
+    };
+    store.save_delta(&r2, &[]).await.unwrap();
+
+    let infos = mgr
+        .list_sessions_for_workspace("/repo/a", None)
+        .await
+        .unwrap();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].session_id, s1);
+    assert_eq!(infos[0].workspace_root.as_deref(), Some("/repo/a"));
+}
+
+#[tokio::test]
 async fn session_continue_inherits_history() {
     let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
     let mgr = SessionManager::new(store.clone());

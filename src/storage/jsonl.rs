@@ -161,6 +161,7 @@ impl SessionStore for JsonlSessionStore {
             let header = RunHeader {
                 run_id: state.run_id,
                 session_id: state.session_id,
+                workspace_root: state.workspace_root.clone(),
                 parent_run_id: state.parent_run_id,
                 title: None,
                 status: status_from_step(&state.step),

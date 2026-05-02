@@ -28,11 +28,9 @@ fn wire_fs_only(root: PathBuf) -> Arc<CapabilityRegistry> {
     reg
 }
 
-fn wire_with_sh(root: PathBuf, allow: Vec<&str>) -> Arc<CapabilityRegistry> {
+fn wire_with_sh(root: PathBuf) -> Arc<CapabilityRegistry> {
     let fs = Arc::new(LinuxFileSystem::new(vec![root]));
-    let proc = Arc::new(LinuxProcessExec::new(
-        allow.into_iter().map(String::from).collect(),
-    ));
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
     let reg = Arc::new(CapabilityRegistry::new());
     muagent::capabilities::tools::register_defaults(&reg, bundle);
@@ -235,7 +233,7 @@ async fn sh_exec_default_timeout_is_30s_not_5s() {
     // Run a command that sleeps 6s without passing timeout_ms.
     // With the old 5s default, this would timeout. With 30s, it succeeds.
     let root = tmp();
-    let reg = wire_with_sh(root, vec!["sh"]);
+    let reg = wire_with_sh(root);
     let t0 = std::time::Instant::now();
     let r = call(
         reg,
@@ -266,7 +264,7 @@ async fn sh_exec_default_timeout_is_30s_not_5s() {
 #[tokio::test]
 async fn sh_exec_auto_background_can_be_polled() {
     let root = tmp();
-    let reg = wire_with_sh(root, vec!["sh"]);
+    let reg = wire_with_sh(root);
 
     let r = call(
         reg.clone(),
@@ -311,7 +309,7 @@ async fn sh_exec_auto_background_can_be_polled() {
 #[tokio::test]
 async fn sh_exec_ignores_empty_job_action_when_starting_command() {
     let root = tmp();
-    let reg = wire_with_sh(root, vec!["sh"]);
+    let reg = wire_with_sh(root);
 
     let r = call(
         reg,
@@ -333,7 +331,7 @@ async fn sh_exec_ignores_empty_job_action_when_starting_command() {
 #[tokio::test]
 async fn sh_exec_sync_mode_still_times_out() {
     let root = tmp();
-    let reg = wire_with_sh(root, vec!["sh"]);
+    let reg = wire_with_sh(root);
 
     let r = call(
         reg,
@@ -355,7 +353,7 @@ async fn sh_exec_sync_mode_still_times_out() {
 #[tokio::test]
 async fn sh_exec_rejects_output_over_cap_without_buffering_all() {
     let root = tmp();
-    let reg = wire_with_sh(root, vec!["sh"]);
+    let reg = wire_with_sh(root);
 
     let r = call(
         reg,

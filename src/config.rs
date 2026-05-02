@@ -62,7 +62,6 @@ pub struct ModelCapabilityOverrides {
 #[derive(Clone, Debug)]
 pub struct FsConfig {
     pub root: PathBuf,
-    pub sh_allowlist: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +153,6 @@ pub struct ConfigOverrides {
     pub base_url: Option<String>,
     pub store: Option<String>,
     pub root: Option<String>,
-    pub allow_sh: Option<Vec<String>>,
     pub cache: Option<String>,
     pub thinking: Option<String>,
     pub max_tokens: Option<u32>,
@@ -359,16 +357,7 @@ impl FsConfig {
             .map(expand_home)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-        let sh_allowlist = overrides
-            .allow_sh
-            .clone()
-            .or_else(|| env_list("MUAGENT_ALLOW_SH"))
-            .or_else(|| {
-                file_cfg.list(&["fs.sh_allowlist", "fs.allow_sh", "sh_allowlist", "allow_sh"])
-            })
-            .unwrap_or_default();
-
-        Self { root, sh_allowlist }
+        Self { root }
     }
 }
 
@@ -1166,10 +1155,6 @@ fn is_known_config_key(key: &str) -> bool {
             | "root"
             | "fs_root"
             | "fs.root"
-            | "allow_sh"
-            | "sh_allowlist"
-            | "fs.allow_sh"
-            | "fs.sh_allowlist"
             | "max_tokens"
             | "keep_tail_turns"
             | "compaction.max_tokens"
@@ -1331,10 +1316,6 @@ mod tests {
             provider = "openrouter"
             model = "openai/gpt-5.4-nano"
             api_key = "sk-or-test"
-
-            [fs]
-            allow_sh = ["sh", "python3"]
-
             [tools]
             disabled = ["net_http"]
             "#,
@@ -1348,10 +1329,6 @@ mod tests {
         assert_eq!(
             cfg.string(&["model.api_key"]).as_deref(),
             Some("sk-or-test")
-        );
-        assert_eq!(
-            cfg.list(&["fs.allow_sh"]).unwrap(),
-            vec!["sh".to_string(), "python3".to_string()]
         );
         assert_eq!(
             cfg.list(&["tools.disabled"]).unwrap(),
@@ -1660,10 +1637,7 @@ mod tests {
                 api_key: None,
                 capabilities: super::ModelCapabilityOverrides::default(),
             },
-            fs: FsConfig {
-                root: ".".into(),
-                sh_allowlist: Vec::new(),
-            },
+            fs: FsConfig { root: ".".into() },
             compaction: CompactionConfig {
                 max_tokens: 156_000,
                 threshold_ratio: 0.8,

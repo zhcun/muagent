@@ -147,8 +147,7 @@ fn model_capability_prompt(caps: &LlmCaps, tools: &[ToolDescriptor]) -> String {
                 alternatives.push("`fs_stat` for file metadata");
             }
             if has_sh_exec {
-                alternatives
-                    .push("`sh_exec` with OCR or image-processing commands exposed by the shell allowlist");
+                alternatives.push("`sh_exec` with available OCR or image-processing commands");
             }
             alternatives.push("a user-provided description");
             out.push_str(&alternatives.join(", "));

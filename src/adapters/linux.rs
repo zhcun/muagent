@@ -1,4 +1,4 @@
-//! Linux 实现:FileSystem(基于 `file://` 根 + allowlist 白名单)+ ProcessExec(allowlist)。
+//! Linux 实现:FileSystem(基于 `file://` 根)+ ProcessExec。
 //!
 //! M1-P1 里 NetEgress Linux 实现先不做(需要 reqwest);M3 阶段加。
 
@@ -255,7 +255,6 @@ fn io_err(e: std::io::Error) -> FsErr {
 
 #[derive(Clone)]
 pub struct LinuxProcessExec {
-    allowlist: Arc<Vec<String>>,
     jobs: Arc<Mutex<HashMap<String, Arc<ManagedJob>>>>,
 }
 
@@ -292,9 +291,8 @@ struct ManagedInner {
 }
 
 impl LinuxProcessExec {
-    pub fn new(allowlist: Vec<String>) -> Self {
+    pub fn new() -> Self {
         Self {
-            allowlist: Arc::new(allowlist),
             jobs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -306,15 +304,7 @@ impl ProcessExec for LinuxProcessExec {
         true
     }
 
-    fn allowlist(&self) -> Vec<String> {
-        (*self.allowlist).clone()
-    }
-
     async fn run(&self, spec: &CmdSpec, cancel: CancelToken) -> Result<ExitOut, ExecErr> {
-        if !self.allowlist.iter().any(|b| b == &spec.bin) {
-            return Err(ExecErr::NotAllowed);
-        }
-
         let mut cmd = Command::new(&spec.bin);
         cmd.args(&spec.args);
         if let Some(cwd) = &spec.cwd {
@@ -429,10 +419,6 @@ impl ProcessExec for LinuxProcessExec {
     }
 
     async fn spawn(&self, spec: &CmdSpec) -> Result<ExecJobSnapshot, ExecErr> {
-        if !self.allowlist.iter().any(|b| b == &spec.bin) {
-            return Err(ExecErr::NotAllowed);
-        }
-
         let mut cmd = Command::new(&spec.bin);
         cmd.args(&spec.args);
         if let Some(cwd) = &spec.cwd {
@@ -535,6 +521,19 @@ impl ProcessExec for LinuxProcessExec {
             }
         }
         Ok(snapshot(&job))
+    }
+
+    async fn list_jobs(&self) -> Result<Vec<ExecJobSnapshot>, ExecErr> {
+        let jobs = self
+            .jobs
+            .lock()
+            .expect("jobs mutex poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut snapshots = jobs.iter().map(|job| snapshot(job)).collect::<Vec<_>>();
+        snapshots.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+        Ok(snapshots)
     }
 }
 

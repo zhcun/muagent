@@ -1,7 +1,7 @@
 //! `muagent` — one-shot or interactive CLI for the μAgent runtime.
 //!
 //! Reads layered config (see `config.rs`), spins up a Runner with default
-//! tools (fs_read / fs_write / optional sh_exec), skill controls, auto
+//! tools (fs_read / fs_write / sh_exec), skill controls, auto
 //! compaction, and a pluggable session store (`memory` by default, optional
 //! JSONL on disk).
 //!
@@ -15,6 +15,7 @@
 //!   /skills       list registered skills
 //!   /quit  |  /exit  |  Ctrl-D   exit
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
@@ -27,8 +28,11 @@ use muagent::core::prelude::*;
 use muagent::core::step::Step;
 use muagent::core::types::{Content, ContentPart, Message};
 use muagent::setup;
-use muagent::tui::{TerminalSession, TuiApp, TuiConfig, UserAction};
+use muagent::tui::{
+    ShJobView, TerminalSession, TuiApp, TuiConfig, TuiEvent, UserAction, UserSubmission,
+};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -41,7 +45,10 @@ async fn main() -> ExitCode {
         cli::Action::Exit(code) => return code,
         cli::Action::Run(invocation) => *invocation,
     };
-    cli::init_tracing(invocation.config.log.as_deref());
+    cli::init_tracing(
+        invocation.config.log.as_deref(),
+        invocation.mode.uses_tui_session(),
+    );
 
     match run(invocation).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -63,54 +70,81 @@ async fn run(invocation: cli::Invocation) -> Result<(), String> {
             if !images.is_empty() {
                 return Err("--image requires a one-shot prompt".into());
             }
-            let state = RunState::new(Uuid::new_v4(), Uuid::new_v4(), clock.now_ms());
+            let state = new_run_state(&cfg, &clock);
             print_banner(&cfg);
             run_repl(wired, cfg, invocation.config, state, &clock).await
         }
-        cli::RunMode::Tui => {
+        cli::RunMode::Tui { prompt } => {
             if !images.is_empty() {
                 return Err("--image is not supported in --tui yet; use a one-shot prompt".into());
             }
-            let state = RunState::new(Uuid::new_v4(), Uuid::new_v4(), clock.now_ms());
-            run_tui(wired, cfg, invocation.config, state, &clock).await
+            let state = new_run_state(&cfg, &clock);
+            run_tui(wired, cfg, invocation.config, state, &clock, prompt).await
         }
-        cli::RunMode::Prompt(prompt) => {
-            let mut state = RunState::new(Uuid::new_v4(), Uuid::new_v4(), clock.now_ms());
+        cli::RunMode::Exec(prompt) => {
+            let mut state = new_run_state(&cfg, &clock);
             run_one_shot(&wired.runner, &mut state, &prompt, &images).await
         }
-        cli::RunMode::ResumeLast { prompt } => {
-            let mut state = resume_last_state(&wired, &clock).await?;
+        cli::RunMode::ResumePicker { all } => {
+            if !images.is_empty() {
+                return Err("--image requires a prompt when resuming".into());
+            }
+            let state = pick_session_state(&wired, &cfg, all, &clock).await?;
+            run_tui(wired, cfg, invocation.config, state, &clock, None).await
+        }
+        cli::RunMode::ResumeLast { prompt, tui } => {
+            let mut state = resume_last_state(&wired, &cfg, &clock).await?;
+            ensure_workspace_root(&mut state, &cfg);
             if let Some(prompt) = prompt {
                 run_one_shot(&wired.runner, &mut state, &prompt, &images).await
             } else {
                 if !images.is_empty() {
                     return Err("--image requires a prompt when resuming".into());
                 }
-                print_banner(&cfg);
-                println!(
-                    "(continued session {}; new run {})",
-                    state.session_id, state.run_id
-                );
-                run_repl(wired, cfg, invocation.config, state, &clock).await
+                if tui {
+                    run_tui(wired, cfg, invocation.config, state, &clock, None).await
+                } else {
+                    print_banner(&cfg);
+                    println!(
+                        "(continued session {}; new run {})",
+                        state.session_id, state.run_id
+                    );
+                    run_repl(wired, cfg, invocation.config, state, &clock).await
+                }
             }
         }
-        cli::RunMode::ResumeSession { session_id, prompt } => {
+        cli::RunMode::ResumeSession {
+            session_id,
+            prompt,
+            tui,
+        } => {
             let sid =
                 Uuid::parse_str(&session_id).map_err(|e| format!("invalid session_id: {e}"))?;
             let mut state = resume_session_state(&wired, sid, &clock).await?;
+            ensure_workspace_root(&mut state, &cfg);
             if let Some(prompt) = prompt {
                 run_one_shot(&wired.runner, &mut state, &prompt, &images).await
             } else {
                 if !images.is_empty() {
                     return Err("--image requires a prompt when resuming".into());
                 }
-                print_banner(&cfg);
-                println!(
-                    "(continued session {}; new run {})",
-                    state.session_id, state.run_id
-                );
-                run_repl(wired, cfg, invocation.config, state, &clock).await
+                if tui {
+                    run_tui(wired, cfg, invocation.config, state, &clock, None).await
+                } else {
+                    print_banner(&cfg);
+                    println!(
+                        "(continued session {}; new run {})",
+                        state.session_id, state.run_id
+                    );
+                    run_repl(wired, cfg, invocation.config, state, &clock).await
+                }
             }
+        }
+        cli::RunMode::ListSessions { all } => {
+            if !images.is_empty() {
+                return Err("sessions does not accept --image".into());
+            }
+            print_sessions(&wired, &cfg, all).await
         }
     }
 }
@@ -119,6 +153,129 @@ struct ReplRuntime {
     wired: setup::Wired,
     cfg: Config,
     overrides: ConfigOverrides,
+}
+
+fn new_run_state(cfg: &Config, clock: &muagent::core::clock::SystemClock) -> RunState {
+    let mut state = RunState::new(Uuid::new_v4(), Uuid::new_v4(), clock.now_ms());
+    ensure_workspace_root(&mut state, cfg);
+    state
+}
+
+fn ensure_workspace_root(state: &mut RunState, cfg: &Config) {
+    if state.workspace_root.is_none() {
+        state.workspace_root = Some(workspace_root(cfg));
+    }
+}
+
+fn workspace_root(cfg: &Config) -> String {
+    cfg.fs
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| cfg.fs.root.clone())
+        .display()
+        .to_string()
+}
+
+async fn sessions_for_display(
+    wired: &setup::Wired,
+    cfg: &Config,
+    all: bool,
+    limit: Option<usize>,
+) -> Result<Vec<muagent::sessions::manager::SessionInfo>, String> {
+    if all {
+        wired
+            .sessions
+            .list_sessions(limit)
+            .await
+            .map_err(|e| format!("list sessions failed: {e}"))
+    } else {
+        wired
+            .sessions
+            .list_sessions_for_workspace(&workspace_root(cfg), limit)
+            .await
+            .map_err(|e| format!("list sessions failed: {e}"))
+    }
+}
+
+async fn print_sessions(wired: &setup::Wired, cfg: &Config, all: bool) -> Result<(), String> {
+    let sessions = sessions_for_display(wired, cfg, all, None).await?;
+    if sessions.is_empty() {
+        if all {
+            println!("No persisted sessions.");
+        } else {
+            println!(
+                "No persisted sessions for {}. Use `muagent sessions --all` to show every workspace.",
+                workspace_root(cfg)
+            );
+        }
+        return Ok(());
+    }
+    print_session_list(&sessions, all);
+    Ok(())
+}
+
+async fn pick_session_state(
+    wired: &setup::Wired,
+    cfg: &Config,
+    all: bool,
+    clock: &muagent::core::clock::SystemClock,
+) -> Result<RunState, String> {
+    let sessions = sessions_for_display(wired, cfg, all, Some(50)).await?;
+    if sessions.is_empty() {
+        return if all {
+            Err("no persisted sessions found".into())
+        } else {
+            Err(format!(
+                "no persisted sessions for {}; use `muagent resume --all` to choose from every workspace",
+                workspace_root(cfg)
+            ))
+        };
+    }
+    print_session_list(&sessions, all);
+    print!("Select session [1-{}] (q to cancel): ", sessions.len());
+    let _ = std::io::stdout().flush();
+    let mut raw = String::new();
+    std::io::stdin()
+        .read_line(&mut raw)
+        .map_err(|e| format!("stdin: {e}"))?;
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("q") || trimmed.is_empty() {
+        return Err("resume cancelled".into());
+    }
+    let idx = trimmed
+        .parse::<usize>()
+        .map_err(|_| format!("invalid selection `{trimmed}`"))?;
+    let Some(session) = sessions.get(idx.saturating_sub(1)) else {
+        return Err(format!("selection out of range: {idx}"));
+    };
+    let mut state = resume_session_state(wired, session.session_id, clock).await?;
+    ensure_workspace_root(&mut state, cfg);
+    Ok(state)
+}
+
+fn print_session_list(sessions: &[muagent::sessions::manager::SessionInfo], show_workspace: bool) {
+    for (idx, s) in sessions.iter().enumerate() {
+        if show_workspace {
+            println!(
+                "{:>2}. session={} runs={} status={:?} updated_ms={} root={}",
+                idx + 1,
+                s.session_id,
+                s.run_count,
+                s.latest_status,
+                s.updated_ms,
+                s.workspace_root.as_deref().unwrap_or("(unknown)")
+            );
+        } else {
+            println!(
+                "{:>2}. session={} runs={} status={:?} updated_ms={}",
+                idx + 1,
+                s.session_id,
+                s.run_count,
+                s.latest_status,
+                s.updated_ms
+            );
+        }
+    }
 }
 
 async fn run_repl(
@@ -173,8 +330,9 @@ async fn run_tui(
     wired: setup::Wired,
     cfg: Config,
     overrides: ConfigOverrides,
-    mut state: RunState,
+    state: RunState,
     clock: &muagent::core::clock::SystemClock,
+    initial_prompt: Option<String>,
 ) -> Result<(), String> {
     let mut runtime = ReplRuntime {
         wired,
@@ -182,50 +340,236 @@ async fn run_tui(
         overrides,
     };
     let mut app = TuiApp::new(tui_config(&runtime.cfg));
-    app.add_system("Full-screen TUI is optional. Type /help for commands.");
+    if state.history.is_empty() {
+        app.add_system("Type /help for commands.");
+    } else {
+        app.add_system(format!(
+            "continued session {}; new run {}",
+            state.session_id, state.run_id
+        ));
+    }
 
     let mut terminal = TerminalSession::enter().map_err(|e| format!("tui init: {e}"))?;
+    refresh_tui_sh_jobs(&mut app, &runtime).await;
+    let mut state_slot = Some(state);
+    let mut inflight: Option<JoinHandle<TuiRunComplete>> = None;
+    let mut queued: VecDeque<UserSubmission> = VecDeque::new();
+    let mut exit_when_idle = false;
+
+    if let Some(prompt) = initial_prompt.filter(|p| !p.trim().is_empty()) {
+        inflight = Some(start_tui_prompt(
+            &runtime,
+            &mut state_slot,
+            &mut app,
+            prompt.clone(),
+            prompt,
+        )?);
+    }
+
     loop {
+        if inflight
+            .as_ref()
+            .map(|handle| handle.is_finished())
+            .unwrap_or(false)
+        {
+            let handle = inflight.take().expect("checked Some above");
+            finish_tui_run(handle, &mut state_slot, &mut app).await?;
+            app.set_status("idle");
+            refresh_tui_sh_jobs(&mut app, &runtime).await;
+            if exit_when_idle {
+                break;
+            }
+            if start_next_queued_tui_submission(
+                &mut inflight,
+                &mut queued,
+                &mut state_slot,
+                &mut runtime,
+                clock,
+                &mut app,
+            )
+            .await?
+            {
+                break;
+            }
+        }
+
+        refresh_tui_sh_jobs(&mut app, &runtime).await;
         terminal.draw(&app).map_err(|e| format!("tui draw: {e}"))?;
 
-        let Some(key) = TerminalSession::read_key(Duration::from_millis(100))
+        let Some(event) = TerminalSession::read_event(Duration::from_millis(100))
             .map_err(|e| format!("tui input: {e}"))?
         else {
             continue;
         };
 
-        match app.handle_key(key) {
+        let action = match event {
+            TuiEvent::Key(key) => app.handle_key(key),
+            TuiEvent::Paste(text) => app.handle_paste(text),
+        };
+
+        match action {
             UserAction::None => {}
-            UserAction::Quit => break,
-            UserAction::Submit(line) => {
-                let trimmed = line.trim();
-                if trimmed.starts_with('/') {
-                    match handle_tui_command(trimmed, &mut state, &mut runtime, clock, &mut app)
-                        .await
+            UserAction::Quit => {
+                if inflight.is_some() {
+                    if exit_when_idle {
+                        if let Some(handle) = inflight.take() {
+                            handle.abort();
+                        }
+                        break;
+                    }
+                    exit_when_idle = true;
+                    runtime.wired.runner.cancel();
+                    app.set_status("cancelling");
+                    app.add_system("cancel requested; press Esc/Ctrl-C again to abort.");
+                } else {
+                    break;
+                }
+            }
+            UserAction::Submit(submission) => {
+                if inflight.is_some() {
+                    let position = queued.len() + 1;
+                    queued.push_back(submission);
+                    app.add_system(format!(
+                        "queued input #{position}; it will run after the current turn."
+                    ));
+                } else {
+                    match process_tui_submission(
+                        submission,
+                        &mut state_slot,
+                        &mut runtime,
+                        clock,
+                        &mut app,
+                    )
+                    .await?
                     {
-                        CmdAction::Continue => {}
-                        CmdAction::Quit => break,
-                        CmdAction::Reset(new_state) => {
-                            state = *new_state;
+                        TuiSubmissionOutcome::Continue => {}
+                        TuiSubmissionOutcome::Quit => break,
+                        TuiSubmissionOutcome::Started(handle) => {
+                            inflight = Some(handle);
                         }
                     }
-                    continue;
                 }
-
-                app.add_user(trimmed.to_string());
-                app.set_status("running");
-                terminal.draw(&app).map_err(|e| format!("tui draw: {e}"))?;
-
-                match submit_and_drive(&runtime.wired.runner, &mut state, trimmed).await {
-                    Ok(()) => append_tui_turn_result(&mut app, &state),
-                    Err(e) => app.add_error(e),
-                }
-                app.set_status("idle");
             }
         }
     }
 
     Ok(())
+}
+
+struct TuiRunComplete {
+    state: RunState,
+    result: Result<(), String>,
+}
+
+enum TuiSubmissionOutcome {
+    Continue,
+    Quit,
+    Started(JoinHandle<TuiRunComplete>),
+}
+
+fn start_tui_prompt(
+    runtime: &ReplRuntime,
+    state_slot: &mut Option<RunState>,
+    app: &mut TuiApp,
+    prompt: String,
+    display: String,
+) -> Result<JoinHandle<TuiRunComplete>, String> {
+    let state = state_slot
+        .take()
+        .ok_or_else(|| "internal tui state unavailable while run is active".to_string())?;
+    app.add_user(display);
+    app.set_status("running");
+    Ok(spawn_tui_run(runtime.wired.runner.clone(), state, prompt))
+}
+
+fn spawn_tui_run(
+    runner: Arc<Runner>,
+    mut state: RunState,
+    prompt: String,
+) -> JoinHandle<TuiRunComplete> {
+    tokio::spawn(async move {
+        let result = submit_and_drive(runner.as_ref(), &mut state, &prompt).await;
+        TuiRunComplete { state, result }
+    })
+}
+
+async fn finish_tui_run(
+    handle: JoinHandle<TuiRunComplete>,
+    state_slot: &mut Option<RunState>,
+    app: &mut TuiApp,
+) -> Result<(), String> {
+    let complete = handle
+        .await
+        .map_err(|e| format!("tui run task failed: {e}"))?;
+    match &complete.result {
+        Ok(()) => append_tui_turn_result(app, &complete.state),
+        Err(e) => app.add_error(e.clone()),
+    }
+    *state_slot = Some(complete.state);
+    Ok(())
+}
+
+async fn process_tui_submission(
+    submission: UserSubmission,
+    state_slot: &mut Option<RunState>,
+    runtime: &mut ReplRuntime,
+    clock: &muagent::core::clock::SystemClock,
+    app: &mut TuiApp,
+) -> Result<TuiSubmissionOutcome, String> {
+    let prompt = submission.prompt;
+    let trimmed = prompt.trim();
+    if submission.is_slash_command {
+        let state = state_slot
+            .as_mut()
+            .ok_or_else(|| "internal tui state unavailable while run is active".to_string())?;
+        return Ok(
+            match handle_tui_command(trimmed, state, runtime, clock, app).await {
+                CmdAction::Continue => TuiSubmissionOutcome::Continue,
+                CmdAction::Quit => TuiSubmissionOutcome::Quit,
+                CmdAction::Reset(new_state) => {
+                    *state = *new_state;
+                    TuiSubmissionOutcome::Continue
+                }
+            },
+        );
+    }
+
+    start_tui_prompt(runtime, state_slot, app, prompt, submission.display)
+        .map(TuiSubmissionOutcome::Started)
+}
+
+async fn start_next_queued_tui_submission(
+    inflight: &mut Option<JoinHandle<TuiRunComplete>>,
+    queued: &mut VecDeque<UserSubmission>,
+    state_slot: &mut Option<RunState>,
+    runtime: &mut ReplRuntime,
+    clock: &muagent::core::clock::SystemClock,
+    app: &mut TuiApp,
+) -> Result<bool, String> {
+    while inflight.is_none() {
+        let Some(submission) = queued.pop_front() else {
+            return Ok(false);
+        };
+        match process_tui_submission(submission, state_slot, runtime, clock, app).await? {
+            TuiSubmissionOutcome::Continue => {}
+            TuiSubmissionOutcome::Quit => return Ok(true),
+            TuiSubmissionOutcome::Started(handle) => {
+                *inflight = Some(handle);
+            }
+        }
+    }
+    Ok(false)
+}
+
+async fn refresh_tui_sh_jobs(app: &mut TuiApp, runtime: &ReplRuntime) {
+    let Some(proc) = runtime.wired.adapters.proc.as_ref() else {
+        app.set_sh_jobs(Vec::new());
+        return;
+    };
+    match proc.list_jobs().await {
+        Ok(jobs) => app.set_sh_jobs(jobs.into_iter().map(ShJobView::from_snapshot).collect()),
+        Err(e) => debug!(error = %e, "sh job refresh failed"),
+    }
 }
 
 async fn run_one_shot(
@@ -334,15 +678,19 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 async fn resume_last_state(
     wired: &setup::Wired,
+    cfg: &Config,
     clock: &muagent::core::clock::SystemClock,
 ) -> Result<RunState, String> {
     let sessions = wired
         .sessions
-        .list_sessions(Some(1))
+        .list_sessions_for_workspace(&workspace_root(cfg), Some(1))
         .await
         .map_err(|e| format!("list sessions failed: {e}"))?;
     let session = sessions.first().ok_or_else(|| {
-        "no persisted sessions found; start one with `muagent \"your task\"` first".to_string()
+        format!(
+            "no persisted sessions found for {}; use `muagent resume --all` to choose from every workspace",
+            workspace_root(cfg)
+        )
     })?;
     resume_session_state(wired, session.session_id, clock).await
 }
@@ -436,15 +784,15 @@ fn is_bad_tool_event(ev: &Event) -> bool {
 fn log_event(ev: &Event) {
     match ev {
         Event::ToolCallStart { tool, call_id, .. } => {
-            info!(tool = %tool, call_id = %call_id, "tool call start");
+            debug!(tool = %tool, call_id = %call_id, "tool call start");
         }
         Event::ToolCallEnd {
             ok, brief, call_id, ..
         } => {
             if *ok {
-                info!(call_id = %call_id, brief = %truncate(brief, 160), "tool call ok");
+                debug!(call_id = %call_id, brief = %truncate(brief, 120), "tool call ok");
             } else {
-                warn!(call_id = %call_id, brief = %truncate(brief, 160), "tool call err");
+                warn!(call_id = %call_id, brief = %truncate(brief, 120), "tool call err");
             }
         }
         Event::HistoryCompacted {
@@ -509,11 +857,7 @@ async fn handle_command(
         }
         "/new" => {
             println!("(new session)");
-            CmdAction::Reset(Box::new(RunState::new(
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                clock.now_ms(),
-            )))
+            CmdAction::Reset(Box::new(new_run_state(&runtime.cfg, clock)))
         }
         "/tokens" => {
             let u = &state.usage;
@@ -619,15 +963,10 @@ async fn handle_command(
         }
         "/list" => {
             let limit = it.next().and_then(|s| s.parse::<usize>().ok());
-            match runtime.wired.sessions.list_sessions(limit).await {
+            match sessions_for_display(&runtime.wired, &runtime.cfg, false, limit).await {
                 Ok(xs) if xs.is_empty() => println!("  (no persisted sessions)"),
                 Ok(xs) => {
-                    for s in xs {
-                        println!(
-                            "  session={} runs={} status={:?} updated_ms={}",
-                            s.session_id, s.run_count, s.latest_status, s.updated_ms
-                        );
-                    }
+                    print_session_list(&xs, false);
                 }
                 Err(e) => eprintln!("list failed: {e}"),
             }
@@ -651,7 +990,8 @@ async fn handle_command(
                 .continue_session(sid, clock.now_ms())
                 .await
             {
-                Ok(next) => {
+                Ok(mut next) => {
+                    ensure_workspace_root(&mut next, &runtime.cfg);
                     println!(
                         "(continued session {}; new run {})",
                         next.session_id, next.run_id
@@ -693,7 +1033,8 @@ async fn handle_command(
                 .fork_from(run_id, index, clock.now_ms())
                 .await
             {
-                Ok(next) => {
+                Ok(mut next) => {
+                    ensure_workspace_root(&mut next, &runtime.cfg);
                     println!(
                         "(forked run {}; new session {} run {})",
                         run_id, next.session_id, next.run_id
@@ -754,11 +1095,7 @@ async fn handle_tui_command(
         }
         "/new" => {
             app.add_system("(new session)");
-            CmdAction::Reset(Box::new(RunState::new(
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                clock.now_ms(),
-            )))
+            CmdAction::Reset(Box::new(new_run_state(&runtime.cfg, clock)))
         }
         "/tokens" => {
             app.add_system(token_summary(state));
@@ -864,7 +1201,7 @@ async fn handle_tui_command(
         }
         "/list" => {
             let limit = it.next().and_then(|s| s.parse::<usize>().ok());
-            match runtime.wired.sessions.list_sessions(limit).await {
+            match sessions_for_display(&runtime.wired, &runtime.cfg, false, limit).await {
                 Ok(xs) if xs.is_empty() => app.add_system("(no persisted sessions)"),
                 Ok(xs) => app.add_system(
                     xs.into_iter()
@@ -899,7 +1236,8 @@ async fn handle_tui_command(
                 .continue_session(sid, clock.now_ms())
                 .await
             {
-                Ok(next) => {
+                Ok(mut next) => {
+                    ensure_workspace_root(&mut next, &runtime.cfg);
                     app.add_system(format!(
                         "continued session {}; new run {}",
                         next.session_id, next.run_id
@@ -941,7 +1279,8 @@ async fn handle_tui_command(
                 .fork_from(run_id, index, clock.now_ms())
                 .await
             {
-                Ok(next) => {
+                Ok(mut next) => {
+                    ensure_workspace_root(&mut next, &runtime.cfg);
                     app.add_system(format!(
                         "forked run {}; new session {} run {}",
                         run_id, next.session_id, next.run_id
@@ -1096,11 +1435,7 @@ fn print_banner(cfg: &Config) {
         "  store={}  fs_root={}  sh={}",
         store,
         cfg.fs.root.display(),
-        if cfg.fs.sh_allowlist.is_empty() {
-            "disabled".into()
-        } else {
-            cfg.fs.sh_allowlist.join(",")
-        }
+        "enabled"
     );
     let thinking_label = match (cfg.runtime.thinking_mode, cfg.runtime.thinking_effort) {
         (muagent::config::ThinkingModeCfg::Off, _) => "off".to_string(),

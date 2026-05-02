@@ -19,6 +19,9 @@ pub struct RunState {
     pub session_id: SessionId,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<RunId>,
 
     pub step: Step,
@@ -118,6 +121,7 @@ impl RunState {
             schema_version: CURRENT_SCHEMA,
             run_id,
             session_id,
+            workspace_root: None,
             parent_run_id: None,
             step: Step::Ready,
             history: Vec::new(),

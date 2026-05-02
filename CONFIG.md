@@ -189,8 +189,7 @@ path = "jsonl:~/.muagent/sessions"
 
 [fs]
 root = "."
-# sh_exec 只有配置 allow_sh 后才注册; 不配置或空数组表示禁用 shell 工具。
-allow_sh = ["rg", "sed", "cargo"]
+# 如需关闭 shell 工具, 使用 tools.disabled = ["sh_exec"]。
 
 [tools]
 # 不写 enabled 时默认暴露所有已注册工具。
@@ -322,18 +321,17 @@ muagent --provider openai-codex "用 ChatGPT/Codex OAuth 跑一次"
 ```toml
 [fs]
 root = "."
-allow_sh = ["rg", "sed", "cargo"]
+# sh_exec 默认注册; 如需关闭, 使用 tools.disabled = ["sh_exec"]。
 ```
 
 | 字段 | 默认值 | 环境变量 | CLI |
 |---|---:|---|---|
 | `fs.root` | 当前工作目录 | `MUAGENT_ROOT` | `--root <DIR>` |
-| `fs.allow_sh` / `fs.sh_allowlist` | `[]` | `MUAGENT_ALLOW_SH` | `--allow-sh <LIST>` |
 
-`allow_sh` 为空时不注册 `sh_exec`。环境变量和 CLI list 使用逗号分隔:
+需要关闭 shell 工具时:
 
 ```bash
-MUAGENT_ALLOW_SH=rg,cargo muagent "跑测试"
+muagent --disable-tools sh_exec
 ```
 
 ## Store
@@ -485,7 +483,6 @@ max_bytes = 65536
 | `MUAGENT_CODEX_ACCESS_TOKEN`, `MUAGENT_CODEX_ACCOUNT_ID`, `MUAGENT_CODEX_REFRESH_TOKEN` | OpenAI Codex override |
 | `MUAGENT_STORE` | Session store |
 | `MUAGENT_ROOT` | 文件工具根目录 |
-| `MUAGENT_ALLOW_SH` | shell 命令 allowlist |
 | `MUAGENT_NET_HTTP` | 是否注册 `net_http` |
 | `MUAGENT_TOOLS`, `MUAGENT_DISABLE_TOOLS` | 工具 allowlist / denylist |
 | `MUAGENT_SKILLS`, `MUAGENT_DISABLE_SKILLS`, `MUAGENT_SKILL_AUTOLOAD` | skill 配置 |
@@ -502,7 +499,6 @@ muagent \
   --provider openai \
   --model gpt-5.4-nano \
   --root . \
-  --allow-sh rg,cargo \
   --disable-tools net_http \
   "跑一下相关测试"
 ```

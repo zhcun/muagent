@@ -146,9 +146,9 @@ async fn live_agent_follows_filesystem_skill() {
     );
 
     // FS adapter rooted at tmp (so agent can read SKILL.md + the script path).
-    // sh_exec allows `sh` so the agent can do `sh -c 'sh /.../get_motd.sh'`.
+    // sh_exec can run `sh` so the agent can do `sh -c 'sh /.../get_motd.sh'`.
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
-    let proc = Arc::new(LinuxProcessExec::new(vec!["sh".into()]));
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
 
     let registry = Arc::new(CapabilityRegistry::new());

@@ -1,7 +1,7 @@
 # μAgent
 
 μAgent 是一个用 Rust 写的 on-device agent runtime。当前仓库提供可直接运行的
-`muagent` CLI, 支持单次任务、交互式 REPL、可选 TUI、持久化 session、自动压缩、
+`muagent` CLI, 支持默认 TUI、单次任务、行模式 REPL、持久化 session、自动压缩、
 内置文件/网络/shell 工具、skills 自动加载, 以及 OpenAI / OpenRouter / Anthropic /
 Google / OpenAI Codex OAuth 等模型后端。
 
@@ -78,29 +78,38 @@ export OPENROUTER_API_KEY=sk-or-...
 运行一次任务:
 
 ```bash
-muagent "总结一下这个仓库的结构"
+muagent exec "总结一下这个仓库的结构"
 ```
 
 ## 基本用法
 
-交互式 REPL:
+默认启动全屏 TUI:
 
 ```bash
 muagent
 ```
 
+行模式 REPL:
+
+```bash
+muagent repl
+```
+
 单次执行:
 
 ```bash
-muagent "阅读 src/lib.rs 并解释模块导出"
+muagent exec "阅读 src/lib.rs 并解释模块导出"
 muagent exec "帮我找出失败测试的原因"
 ```
 
 继续最近的持久化 session:
 
 ```bash
+muagent resume
 muagent resume --last
+muagent resume "继续刚才的任务"
 muagent exec resume --last "继续刚才的任务"
+muagent sessions
 ```
 
 临时切换 provider / model:

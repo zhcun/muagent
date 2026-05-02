@@ -106,6 +106,7 @@ pub enum RunStatus {
 pub struct RunHeader {
     pub run_id: RunId,
     pub session_id: SessionId,
+    pub workspace_root: Option<String>,
     pub parent_run_id: Option<RunId>,
     pub title: Option<String>,
     pub status: RunStatus,

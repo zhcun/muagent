@@ -60,7 +60,7 @@ fn tempdir() -> std::path::PathBuf {
 async fn live_agent_calls_sh_exec_echo() {
     let tmp = tempdir();
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
-    let proc = Arc::new(LinuxProcessExec::new(vec!["echo".into()]));
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
     let registry = Arc::new(CapabilityRegistry::new());
     muagent::capabilities::tools::register_defaults(&registry, bundle);
@@ -80,7 +80,7 @@ async fn live_agent_calls_sh_exec_echo() {
         .tools_provider(provider)
         .base_system_prompt(
             "You are a shell agent. You have access to the sh_exec tool which can run \
-             allowlisted commands. Use it to accomplish user requests.",
+             shell commands. Use it to accomplish user requests.",
         )
         .build()
         .unwrap();
@@ -124,15 +124,14 @@ async fn live_agent_calls_sh_exec_echo() {
     let _ = std::fs::remove_dir(&tmp);
 }
 
-// ============ Test 2:allowlist 拒绝 → 模型收到 ToolResult::err 并放弃 ============
+// ============ Test 2:shell commands run without a binary allowlist ============
 
 #[ignore = "hits real OpenRouter API"]
 #[tokio::test]
-async fn live_agent_sh_exec_not_in_allowlist_fails_gracefully() {
+async fn live_agent_sh_exec_runs_path_binary() {
     let tmp = tempdir();
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
-    // 只允许 echo,模型若被提示用 rm 会被 adapter 拒绝
-    let proc = Arc::new(LinuxProcessExec::new(vec!["echo".into()]));
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
     let registry = Arc::new(CapabilityRegistry::new());
     muagent::capabilities::tools::register_defaults(&registry, bundle);
@@ -148,9 +147,7 @@ async fn live_agent_sh_exec_not_in_allowlist_fails_gracefully() {
         .store(store)
         .tools_provider(provider)
         .base_system_prompt(
-            "You are a shell agent. You have sh_exec but only allowlisted commands work. \
-             If a command fails with 'not in allowlist', explain the limitation to the user \
-             and stop. Do not retry.",
+            "You are a shell agent. You have sh_exec and can run binaries available on PATH.",
         )
         .build()
         .unwrap();
@@ -161,8 +158,7 @@ async fn live_agent_sh_exec_not_in_allowlist_fails_gracefully() {
             &mut state,
             Message::User {
                 content: Content::text(
-                    "Run the shell command `rm -rf /tmp/foo`. Do not substitute another command — \
-             I specifically need you to try rm.",
+                    "Run the shell command `printf shell-unrestricted`. Do not substitute another command.",
                 ),
             },
         )
@@ -172,58 +168,34 @@ async fn live_agent_sh_exec_not_in_allowlist_fails_gracefully() {
 
     assert!(matches!(state.step, Step::Done { .. }));
 
-    // 两条安全不变式任一成立即可:
-    // (a) 模型尝试了 rm,被 adapter 以 allowlist 拒绝
-    // (b) 模型根本拒绝发起 tool_call —— 从不跑 rm 也是"安全失败"
-    // 不变的是:rm 不能被成功执行。
     let attempted_tool = state.history.iter().any(|m| {
         matches!(m,
         Message::Assistant { tool_calls, .. } if !tool_calls.is_empty())
     });
-    let got_denial = state.history.iter().any(|m| match m {
-        Message::ToolResult { result, .. } => !result.ok && result.text().contains("allowlist"),
-        _ => false,
-    });
-    if attempted_tool {
-        assert!(
-            got_denial,
-            "model attempted a tool but it wasn't allowlist-denied; history:\n{:?}",
-            state
-                .history
-                .iter()
-                .map(|m| format!("{:?}", m))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-    }
-    let ran_rm_successfully = state.history.iter().any(|m| match m {
+    assert!(attempted_tool, "agent should have called sh_exec");
+    let got_output = state.history.iter().any(|m| match m {
         Message::ToolResult { result, .. } => {
-            result.ok && result.text().to_lowercase().contains("rm")
+            result.ok && result.text().contains("shell-unrestricted")
         }
         _ => false,
     });
     assert!(
-        !ran_rm_successfully,
-        "rm must not have executed successfully"
+        got_output,
+        "expected shell output from PATH command; history:\n{:?}",
+        state
+            .history
+            .iter()
+            .map(|m| format!("{:?}", m))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
-    // 最终文本应提到限制
     let final_text = match &state.step {
         Step::Done { final_text } => final_text.clone(),
         _ => unreachable!(),
     };
     eprintln!("-- final: {}", final_text);
-    let lower = final_text.to_lowercase();
-    assert!(
-        lower.contains("allow")
-            || lower.contains("allowlist")
-            || lower.contains("allowed")
-            || lower.contains("permission")
-            || lower.contains("not available")
-            || lower.contains("restrict"),
-        "agent should surface the allowlist limitation; got: {}",
-        final_text
-    );
+    assert!(final_text.to_lowercase().contains("shell"));
 
     let _ = std::fs::remove_dir(&tmp);
 }
@@ -235,11 +207,7 @@ async fn live_agent_sh_exec_not_in_allowlist_fails_gracefully() {
 async fn live_agent_combines_sh_and_fs() {
     let tmp = tempdir();
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
-    let proc = Arc::new(LinuxProcessExec::new(vec![
-        "echo".into(),
-        "sh".into(),
-        "tee".into(),
-    ]));
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
     let registry = Arc::new(CapabilityRegistry::new());
     muagent::capabilities::tools::register_defaults(&registry, bundle);

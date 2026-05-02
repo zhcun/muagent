@@ -127,33 +127,45 @@ model = "gpt-5.5"
 
 ## CLI 用法
 
-启动交互式 REPL:
+默认启动全屏 TUI:
 
 ```bash
 muagent
 ```
 
-启动可选的全屏 TUI:
+启动行模式 REPL:
 
 ```bash
-muagent --tui
+muagent repl
+# 或
+muagent --repl
 ```
 
-TUI 不是核心运行模式, 主要用于更舒服地交互。它复用同一套 slash commands, 例如
-`/help`, `/model`, `/provider`, `/tokens`, `/history`, `/list`, `/continue`。`Esc`
-或 `Ctrl-C` 退出, `PageUp` / `PageDown` 滚动消息区。
+TUI 是默认交互模式。它复用同一套 slash commands, 例如 `/help`, `/model`,
+`/provider`, `/tokens`, `/history`, `/list`, `/continue`。`Esc` 或 `Ctrl-C`
+退出, `PageUp` / `PageDown` 滚动消息区。输入为空或单行时, `Up` / `Down`
+浏览本次 TUI 的输入历史; 多行输入里仍作为光标移动。TUI 支持 bracketed paste:
+短文本会进入输入框, 多行或很长的粘贴会在界面里显示为 `[pasted N lines]` 摘要,
+提交时仍发送完整原文。底部状态栏会显示后台 `sh_exec` job 数量; `Ctrl-B` 或
+`F2` 打开 job 列表, `Up` / `Down` 选择, `Enter` 查看详情, `Esc` 返回。
 
 单次执行任务:
 
 ```bash
-muagent "阅读 src/lib.rs 并解释模块导出"
+muagent exec "阅读 src/lib.rs 并解释模块导出"
 muagent exec "帮我找出失败测试的原因"
+```
+
+带 prompt 启动 TUI:
+
+```bash
+muagent "阅读 src/lib.rs 并解释模块导出"
 ```
 
 携带本地图片输入:
 
 ```bash
-muagent \
+muagent exec \
   --image ./screenshots/error.png \
   "说明这张截图里的报错"
 ```
@@ -163,8 +175,17 @@ muagent \
 继续最近的持久化 session:
 
 ```bash
+muagent resume              # 列出当前 workspace 的 sessions 并选择
 muagent resume --last
+muagent resume "继续刚才的任务"
 muagent exec resume --last "继续刚才的任务"
+```
+
+列出 session:
+
+```bash
+muagent sessions
+muagent sessions --all
 ```
 
 继续指定 session:
@@ -180,9 +201,9 @@ muagent exec resume <SESSION_ID> "下一步做什么"
 muagent -- "- 这是一个以短横线开头的 prompt"
 ```
 
-## REPL 命令
+## TUI / REPL 命令
 
-进入 REPL 后可使用:
+进入 TUI 或 REPL 后可使用:
 
 | 命令 | 说明 |
 |---|---|
@@ -191,9 +212,9 @@ muagent -- "- 这是一个以短横线开头的 prompt"
 | `/tokens` | 查看当前 session token / cost 统计 |
 | `/history` | 打印最近 20 条消息摘要 |
 | `/model` | 显示当前 provider / model |
-| `/model <model_id>` | 切换当前 REPL 的 model, 不写回配置文件 |
+| `/model <model_id>` | 切换当前 session 的 model, 不写回配置文件 |
 | `/provider` | 显示当前 provider / model |
-| `/provider <name> [model_id]` | 切换当前 REPL 的 provider / model, 不写回配置文件 |
+| `/provider <name> [model_id]` | 切换当前 session 的 provider / model, 不写回配置文件 |
 | `/skills` | 列出已注册 skills |
 | `/session` | 显示当前 session_id / run_id / step |
 | `/list` | 列出持久化 sessions |
@@ -208,10 +229,10 @@ muagent -- "- 这是一个以短横线开头的 prompt"
 
 - `fs_read`, `fs_write`, `fs_edit`, `fs_list`, `fs_stat`, `fs_delete`, `fs_rename`
 - `net_http`, 默认注册; 可用 `MUAGENT_NET_HTTP=off` 或 `--disable-tools net_http` 关闭
-- `sh_exec`, 只有配置了 `allow_sh` / `MUAGENT_ALLOW_SH` 后才注册
+- `sh_exec`, 默认注册, 直接运行 PATH 上的 binary 或指定路径
 
-文件工具被限制在 `fs.root` / `--root` 下。`sh_exec` 只允许执行 allowlist 中的 binary
-名称, 例如 `rg` 或 `cargo`; 没有配置 allowlist 时不会暴露 shell 工具。
+文件工具被限制在 `fs.root` / `--root` 下。`sh_exec` 可运行 PATH 上的 binary
+或指定路径; 需要禁用整个 shell 工具时, 用 `--disable-tools sh_exec`。
 
 ## Skills 与 Agent 指令
 

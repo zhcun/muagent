@@ -64,7 +64,7 @@ pub(crate) fn map_fs_err(e: crate::adapters::FsErr) -> ToolErr {
 /// Register the default built-in tools that are broadly safe and universally useful.
 ///
 /// - `fs_*` (read / edit / write / list / stat / delete / rename): always registered
-/// - `sh_exec`: only if `bundle.proc` is provided (and its own allowlist applies)
+/// - `sh_exec`: only if `bundle.proc` is provided
 /// - `net_http`: only if `bundle.net` is provided
 pub fn register_defaults(registry: &CapabilityRegistry, bundle: Arc<AdapterBundle>) {
     registry.register(Arc::new(fs_edit::FsEdit::new(bundle.clone())));

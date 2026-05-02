@@ -1,7 +1,7 @@
 //! Argv parsing and tracing init for the `muagent` binary.
 //!
 //! Hand-rolled to avoid pulling in clap. Supports `-h`/`--help`,
-//! `-V`/`--version`, optional `--tui`, and flag overrides that map to the same env vars
+//! `-V`/`--version`, UI mode flags, and flag overrides that map to the same env vars
 //! `config::Config::load` reads. CLI flags win over env without mutating the
 //! process environment.
 
@@ -11,20 +11,17 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{parse_list_arg, ConfigOverrides};
 
-/// Single source of truth for REPL command list. Both `/help` and the CLI
+/// Single source of truth for interactive command list. Both `/help` and the CLI
 /// `--help` read from here so the two views stay aligned.
 pub const REPL_COMMANDS: &[(&str, &str)] = &[
     ("/help", "show this help"),
     ("/new", "start a new session (drop history)"),
     ("/tokens", "show token usage for current session"),
     ("/history", "print last 20 messages briefly"),
-    (
-        "/model [model_id]",
-        "show or switch model for this REPL session",
-    ),
+    ("/model [model_id]", "show or switch model for this session"),
     (
         "/provider [name] [model_id]",
-        "show or switch provider/model for this REPL session",
+        "show or switch provider/model for this session",
     ),
     ("/skills", "list registered skills"),
     ("/session", "show run/session ids and step"),
@@ -56,15 +53,44 @@ pub struct Invocation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunMode {
     Repl,
-    Tui,
-    Prompt(String),
+    Tui {
+        prompt: Option<String>,
+    },
+    Exec(String),
+    ResumePicker {
+        all: bool,
+    },
     ResumeLast {
         prompt: Option<String>,
+        tui: bool,
     },
     ResumeSession {
         session_id: String,
         prompt: Option<String>,
+        tui: bool,
     },
+    ListSessions {
+        all: bool,
+    },
+}
+
+impl RunMode {
+    pub fn uses_tui_session(&self) -> bool {
+        matches!(
+            self,
+            RunMode::Tui { .. }
+                | RunMode::ResumePicker { .. }
+                | RunMode::ResumeLast {
+                    prompt: None,
+                    tui: true,
+                }
+                | RunMode::ResumeSession {
+                    prompt: None,
+                    tui: true,
+                    ..
+                }
+        )
+    }
 }
 
 /// Parse argv; on `--help`/`--version`, print and return Exit. On flags,
@@ -78,7 +104,7 @@ fn parse_from(args: Vec<String>) -> Action {
     let mut i = 0;
     let mut images = Vec::new();
     let mut config = ConfigOverrides::default();
-    let mut tui = false;
+    let mut tui = true;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
@@ -92,6 +118,9 @@ fn parse_from(args: Vec<String>) -> Action {
             }
             "--tui" => {
                 tui = true;
+            }
+            "--repl" => {
+                tui = false;
             }
             "--config-file" => {
                 if let Some(v) = next_val(&args, &mut i) {
@@ -145,13 +174,6 @@ fn parse_from(args: Vec<String>) -> Action {
             "--root" => {
                 if let Some(v) = next_val(&args, &mut i) {
                     config.root = Some(v);
-                } else {
-                    return Action::Exit(missing(a));
-                }
-            }
-            "--allow-sh" => {
-                if let Some(v) = next_val(&args, &mut i) {
-                    config.allow_sh = Some(parse_list_arg(&v));
                 } else {
                     return Action::Exit(missing(a));
                 }
@@ -229,45 +251,59 @@ fn parse_from(args: Vec<String>) -> Action {
                 config.skill_autoload = Some(false);
             }
             "exec" => {
-                if tui {
-                    return Action::Exit(tui_mode_conflict("exec"));
-                }
                 return parse_exec(&args[i + 1..], images, config);
             }
             "resume" => {
-                if tui {
-                    return Action::Exit(tui_mode_conflict("resume"));
-                }
-                return parse_resume(&args[i + 1..], false, images, config);
+                return parse_resume(&args[i + 1..], false, tui, images, config);
+            }
+            "sessions" | "list" => {
+                return parse_sessions(&args[i + 1..], images, config);
+            }
+            "repl" => {
+                return run(RunMode::Repl, images, config);
             }
             "--" => {
                 if i + 1 >= args.len() {
                     return run(
-                        if tui { RunMode::Tui } else { RunMode::Repl },
+                        if tui {
+                            RunMode::Tui { prompt: None }
+                        } else {
+                            RunMode::Repl
+                        },
                         images,
                         config,
                     );
                 }
-                if tui {
-                    return Action::Exit(tui_mode_conflict("a prompt"));
-                }
-                return run(RunMode::Prompt(args[i + 1..].join(" ")), images, config);
+                return run(
+                    RunMode::Tui {
+                        prompt: Some(args[i + 1..].join(" ")),
+                    },
+                    images,
+                    config,
+                );
             }
             other => {
                 if other.starts_with('-') {
                     eprintln!("muagent: unknown argument `{other}`. Try --help.");
                     return Action::Exit(ExitCode::from(2));
                 }
-                if tui {
-                    return Action::Exit(tui_mode_conflict("a prompt"));
-                }
-                return run(RunMode::Prompt(args[i..].join(" ")), images, config);
+                return run(
+                    RunMode::Tui {
+                        prompt: Some(args[i..].join(" ")),
+                    },
+                    images,
+                    config,
+                );
             }
         }
         i += 1;
     }
     run(
-        if tui { RunMode::Tui } else { RunMode::Repl },
+        if tui {
+            RunMode::Tui { prompt: None }
+        } else {
+            RunMode::Repl
+        },
         images,
         config,
     )
@@ -289,18 +325,18 @@ fn parse_exec(args: &[String], mut images: Vec<String>, config: ConfigOverrides)
                     return Action::Exit(missing(&args[i]));
                 }
             }
-            "resume" => return parse_resume(&args[i + 1..], true, images, config),
+            "resume" => return parse_resume(&args[i + 1..], true, false, images, config),
             "--" => {
                 if i + 1 >= args.len() {
                     break;
                 }
-                return run(RunMode::Prompt(args[i + 1..].join(" ")), images, config);
+                return run(RunMode::Exec(args[i + 1..].join(" ")), images, config);
             }
             other if other.starts_with('-') => {
                 eprintln!("muagent: unknown exec argument `{other}`. Try --help.");
                 return Action::Exit(ExitCode::from(2));
             }
-            _ => return run(RunMode::Prompt(args[i..].join(" ")), images, config),
+            _ => return run(RunMode::Exec(args[i..].join(" ")), images, config),
         }
     }
     eprintln!("muagent: `exec` requires a prompt, or `exec resume --last <prompt>`");
@@ -310,17 +346,23 @@ fn parse_exec(args: &[String], mut images: Vec<String>, config: ConfigOverrides)
 fn parse_resume(
     args: &[String],
     prompt_required: bool,
+    tui: bool,
     mut images: Vec<String>,
     config: ConfigOverrides,
 ) -> Action {
+    if args.is_empty() && !prompt_required {
+        return run(RunMode::ResumePicker { all: false }, images, config);
+    }
     if args.is_empty() {
-        eprintln!("muagent: `resume` requires `--last` or a session id");
+        eprintln!("muagent: `exec resume` requires a prompt, `--last <prompt>`, or a session id");
         return Action::Exit(ExitCode::from(2));
     }
 
     let mut i = 0;
     let mut last = false;
+    let mut all = false;
     let mut session_id: Option<String> = None;
+    let mut prompt_from_first_arg: Option<String> = None;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
@@ -330,6 +372,10 @@ fn parse_resume(
             }
             "--last" => {
                 last = true;
+                i += 1;
+            }
+            "--all" => {
+                all = true;
                 i += 1;
             }
             "--" => {
@@ -350,10 +396,15 @@ fn parse_resume(
             }
             other => {
                 if !last && session_id.is_none() {
-                    session_id = Some(other.to_string());
-                    i += 1;
-                    if args.get(i).map(String::as_str) == Some("--") {
+                    if uuid::Uuid::parse_str(other).is_ok() {
+                        session_id = Some(other.to_string());
                         i += 1;
+                        if args.get(i).map(String::as_str) == Some("--") {
+                            i += 1;
+                        }
+                    } else {
+                        prompt_from_first_arg = Some(args[i..].join(" "));
+                        i = args.len();
                     }
                 }
                 break;
@@ -361,7 +412,9 @@ fn parse_resume(
         }
     }
 
-    let prompt = if i < args.len() {
+    let prompt = if let Some(prompt) = prompt_from_first_arg {
+        Some(prompt)
+    } else if i < args.len() {
         Some(args[i..].join(" "))
     } else {
         None
@@ -371,18 +424,46 @@ fn parse_resume(
         return Action::Exit(ExitCode::from(2));
     }
 
+    let tui = tui && prompt.is_none() && !prompt_required;
     if last {
-        run(RunMode::ResumeLast { prompt }, images, config)
+        run(RunMode::ResumeLast { prompt, tui }, images, config)
     } else if let Some(session_id) = session_id {
         run(
-            RunMode::ResumeSession { session_id, prompt },
+            RunMode::ResumeSession {
+                session_id,
+                prompt,
+                tui,
+            },
             images,
             config,
         )
+    } else if prompt.is_some() {
+        run(RunMode::ResumeLast { prompt, tui }, images, config)
     } else {
-        eprintln!("muagent: `resume` requires `--last` or a session id");
-        Action::Exit(ExitCode::from(2))
+        run(RunMode::ResumePicker { all }, images, config)
     }
+}
+
+fn parse_sessions(args: &[String], images: Vec<String>, config: ConfigOverrides) -> Action {
+    if !images.is_empty() {
+        eprintln!("muagent: sessions does not accept --image");
+        return Action::Exit(ExitCode::from(2));
+    }
+    let mut all = false;
+    for a in args {
+        match a.as_str() {
+            "-h" | "--help" => {
+                print_help();
+                return Action::Exit(ExitCode::SUCCESS);
+            }
+            "--all" => all = true,
+            other => {
+                eprintln!("muagent: unknown sessions argument `{other}`. Try --help.");
+                return Action::Exit(ExitCode::from(2));
+            }
+        }
+    }
+    run(RunMode::ListSessions { all }, images, config)
 }
 
 fn run(mode: RunMode, images: Vec<String>, config: ConfigOverrides) -> Action {
@@ -417,30 +498,30 @@ fn missing(flag: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-fn tui_mode_conflict(kind: &str) -> ExitCode {
-    eprintln!("muagent: --tui starts an interactive session and cannot be combined with {kind}");
-    ExitCode::from(2)
-}
-
 fn print_help() {
     let bin = "muagent";
     println!(
         "\
-{bin} {ver} — interactive REPL for the μAgent runtime.
+{bin} {ver} — agent terminal for the μAgent runtime.
 
 USAGE:
-    {bin} [OPTIONS]
-    {bin} [OPTIONS] <PROMPT>
+    {bin} [OPTIONS]                Start the TUI
+    {bin} [OPTIONS] <PROMPT>       Start the TUI with an initial prompt
     {bin} [OPTIONS] exec <PROMPT>
+    {bin} [OPTIONS] resume
+    {bin} [OPTIONS] resume [PROMPT]
     {bin} [OPTIONS] resume --last [PROMPT]
     {bin} [OPTIONS] resume <SESSION_ID> [PROMPT]
     {bin} [OPTIONS] exec resume --last <PROMPT>
     {bin} [OPTIONS] exec resume <SESSION_ID> <PROMPT>
+    {bin} [OPTIONS] sessions [--all]
+    {bin} [OPTIONS] repl
 
 OPTIONS:
   -h, --help              Print this help and exit.
   -V, --version           Print version and exit.
-      --tui               Start the optional full-screen terminal UI.
+      --tui               Start the full-screen terminal UI (default without a prompt).
+      --repl              Start the line REPL instead of the TUI when no prompt is given.
 
       --config-file <FILE>
                           Load this config.toml instead of the default config
@@ -456,8 +537,6 @@ OPTIONS:
                           `jsonl:/path/to/store` for a file-backed JSONL store.
                           A plain path is also treated as JSONL. (env: MUAGENT_STORE)
       --root <DIR>        Sandbox root for fs tools (env: MUAGENT_ROOT).
-      --allow-sh <LIST>   Comma-separated shell allowlist (e.g. \"echo,cat\").
-                          Empty disables sh_exec. (env: MUAGENT_ALLOW_SH)
       --mcp-sse <URLS>    Comma-separated legacy MCP SSE endpoint(s), e.g.
                           http://127.0.0.1:10086/sse. Repeated flags are
                           accepted. (env: MUAGENT_MCP_SSE)
@@ -522,7 +601,7 @@ CONFIG FILES:
     summary_input_max_tokens = 100000
     summary_output_max_tokens = 8000
 
-REPL COMMANDS:
+INTERACTIVE COMMANDS:
   {repl_commands}",
         bin = bin,
         ver = env!("CARGO_PKG_VERSION"),
@@ -534,15 +613,21 @@ REPL COMMANDS:
     );
 }
 
-/// Initialize the tracing subscriber. Respects MUAGENT_LOG → RUST_LOG,
-/// defaults to `muagent=info,warn`. Writes to stderr so REPL output on
-/// stdout stays clean.
-pub fn init_tracing(cli_filter: Option<&str>) {
-    let filter = cli_filter
+/// Initialize the tracing subscriber. Respects MUAGENT_LOG → RUST_LOG.
+/// TUI sessions default to quiet logging so stderr does not paint over the
+/// alternate-screen UI.
+pub fn init_tracing(cli_filter: Option<&str>, tui_session: bool) {
+    let explicit_filter = cli_filter
         .map(ToOwned::to_owned)
         .or_else(|| std::env::var("MUAGENT_LOG").ok())
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "muagent=info,warn".into());
+        .or_else(|| std::env::var("RUST_LOG").ok());
+    let filter = explicit_filter.unwrap_or_else(|| {
+        if tui_session {
+            "off".into()
+        } else {
+            "muagent=info,warn".into()
+        }
+    });
     let env_filter =
         EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("muagent=info,warn"));
     let _ = tracing_subscriber::fmt()
@@ -584,10 +669,22 @@ mod tests {
     }
 
     #[test]
-    fn positional_prompt_runs_one_shot() {
+    fn no_args_runs_tui_by_default() {
+        assert_eq!(mode(&[]), RunMode::Tui { prompt: None });
+    }
+
+    #[test]
+    fn repl_subcommand_runs_line_repl() {
+        assert_eq!(mode(&["repl"]), RunMode::Repl);
+    }
+
+    #[test]
+    fn positional_prompt_starts_tui_with_initial_prompt() {
         assert_eq!(
             mode(&["Explain", "this", "codebase"]),
-            RunMode::Prompt("Explain this codebase".into())
+            RunMode::Tui {
+                prompt: Some("Explain this codebase".into())
+            }
         );
     }
 
@@ -595,13 +692,13 @@ mod tests {
     fn exec_prompt_runs_one_shot() {
         assert_eq!(
             mode(&["exec", "Fix", "the", "bug"]),
-            RunMode::Prompt("Fix the bug".into())
+            RunMode::Exec("Fix the bug".into())
         );
     }
 
     #[test]
     fn tui_flag_runs_tui_mode() {
-        assert_eq!(mode(&["--tui"]), RunMode::Tui);
+        assert_eq!(mode(&["--tui"]), RunMode::Tui { prompt: None });
     }
 
     #[test]
@@ -609,7 +706,8 @@ mod tests {
         assert_eq!(
             mode(&["exec", "resume", "--last", "Fix", "it"]),
             RunMode::ResumeLast {
-                prompt: Some("Fix it".into())
+                prompt: Some("Fix it".into()),
+                tui: false,
             }
         );
     }
@@ -618,7 +716,9 @@ mod tests {
     fn separator_allows_prompt_starting_with_dash() {
         assert_eq!(
             mode(&["--", "- First name: Yusuf"]),
-            RunMode::Prompt("- First name: Yusuf".into())
+            RunMode::Tui {
+                prompt: Some("- First name: Yusuf".into())
+            }
         );
     }
 
@@ -626,7 +726,7 @@ mod tests {
     fn exec_separator_allows_prompt_starting_with_dash() {
         assert_eq!(
             mode(&["exec", "--", "- First name: Yusuf"]),
-            RunMode::Prompt("- First name: Yusuf".into())
+            RunMode::Exec("- First name: Yusuf".into())
         );
     }
 
@@ -635,15 +735,38 @@ mod tests {
         assert_eq!(
             mode(&["resume", "--last", "--", "- First name: Yusuf"]),
             RunMode::ResumeLast {
-                prompt: Some("- First name: Yusuf".into())
+                prompt: Some("- First name: Yusuf".into()),
+                tui: false,
+            }
+        );
+    }
+
+    #[test]
+    fn resume_without_prompt_uses_tui_by_default() {
+        assert_eq!(
+            mode(&["resume", "--last"]),
+            RunMode::ResumeLast {
+                prompt: None,
+                tui: true,
+            }
+        );
+    }
+
+    #[test]
+    fn resume_without_prompt_can_use_line_repl() {
+        assert_eq!(
+            mode(&["--repl", "resume", "--last"]),
+            RunMode::ResumeLast {
+                prompt: None,
+                tui: false,
             }
         );
     }
 
     #[test]
     fn image_flag_accepts_comma_list() {
-        let got = invocation(&["--image", "a.png,b.jpg", "Summarize", "these"]);
-        assert_eq!(got.mode, RunMode::Prompt("Summarize these".into()));
+        let got = invocation(&["--image", "a.png,b.jpg", "exec", "Summarize", "these"]);
+        assert_eq!(got.mode, RunMode::Exec("Summarize these".into()));
         assert_eq!(got.images, vec!["a.png", "b.jpg"]);
     }
 
@@ -652,20 +775,43 @@ mod tests {
         let got = invocation(&[
             "--disable-tools",
             "net_http,sh_exec",
-            "--allow-sh",
-            "",
             "--max-tokens",
             "42000",
+            "exec",
             "run",
             "task",
         ]);
-        assert_eq!(got.mode, RunMode::Prompt("run task".into()));
+        assert_eq!(got.mode, RunMode::Exec("run task".into()));
         assert_eq!(
             got.config.tool_denylist,
             Some(vec!["net_http".into(), "sh_exec".into()])
         );
-        assert_eq!(got.config.allow_sh, Some(Vec::new()));
         assert_eq!(got.config.max_tokens, Some(42_000));
+    }
+
+    #[test]
+    fn bare_resume_opens_picker() {
+        assert_eq!(mode(&["resume"]), RunMode::ResumePicker { all: false });
+    }
+
+    #[test]
+    fn resume_prompt_continues_last_non_interactively() {
+        assert_eq!(
+            mode(&["resume", "continue", "the", "task"]),
+            RunMode::ResumeLast {
+                prompt: Some("continue the task".into()),
+                tui: false,
+            }
+        );
+    }
+
+    #[test]
+    fn sessions_lists_current_workspace_by_default() {
+        assert_eq!(mode(&["sessions"]), RunMode::ListSessions { all: false });
+        assert_eq!(
+            mode(&["list", "--all"]),
+            RunMode::ListSessions { all: true }
+        );
     }
 
     #[test]
@@ -681,7 +827,8 @@ mod tests {
             ]),
             RunMode::ResumeSession {
                 session_id: "7f9f9a2e-1b3c-4c7a-9b0e-000000000000".into(),
-                prompt: Some("Implement the plan".into())
+                prompt: Some("Implement the plan".into()),
+                tui: false,
             }
         );
     }
@@ -697,7 +844,8 @@ mod tests {
             ]),
             RunMode::ResumeSession {
                 session_id: "7f9f9a2e-1b3c-4c7a-9b0e-000000000000".into(),
-                prompt: Some("- First name: Yusuf".into())
+                prompt: Some("- First name: Yusuf".into()),
+                tui: false,
             }
         );
     }

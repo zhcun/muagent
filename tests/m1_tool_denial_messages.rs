@@ -1,5 +1,5 @@
-//! Offline: when a tool call is rejected (allowlist, unknown name, shell
-//! denial), the executor returns a structured ToolResult the LLM can read
+//! Offline: when a tool call is rejected (allowlist, unknown name), the executor
+//! returns a structured ToolResult the LLM can read
 //! and act on — NOT a framework error. These are all recoverable conditions.
 
 use std::path::PathBuf;
@@ -99,33 +99,27 @@ async fn unknown_tool_returns_structured_result_not_framework_error() {
     assert!(hint.contains("fs_read"));
 }
 
-// === Scenario 3: sh_exec with a binary NOT in the adapter allowlist ===
+// === Scenario 3: sh_exec runs PATH binaries without a binary allowlist ===
 
 #[tokio::test]
-async fn sh_exec_denial_lists_allowed_binaries_in_hint() {
+async fn sh_exec_runs_path_binaries() {
     let tmp = tmpdir();
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp]));
-    let proc = Arc::new(LinuxProcessExec::new(vec!["echo".into(), "cat".into()]));
+    let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
     let reg = Arc::new(CapabilityRegistry::new());
     muagent::capabilities::tools::register_defaults(&reg, bundle);
     let exec = DefaultToolExecutor::new(reg);
 
-    let r = run(&exec, "sh_exec", json!({"bin":"rm","args":["-rf","/"]})).await;
+    let r = run(
+        &exec,
+        "sh_exec",
+        json!({"bin":"echo","args":["shell", "is", "unrestricted"]}),
+    )
+    .await;
 
-    assert!(!r.ok);
-    assert!(!r.retryable);
-    assert!(
-        r.text().to_lowercase().contains("not in the allowlist")
-            || r.text().to_lowercase().contains("not in allowlist")
-    );
-    let hint = r.hint.as_deref().unwrap_or("");
-    assert!(
-        hint.contains("echo"),
-        "hint should list allowed bins; got: {hint}"
-    );
-    assert!(hint.contains("cat"));
-    assert!(!hint.contains("rm"));
+    assert!(r.ok, "{:?}", r);
+    assert!(r.text().contains("shell is unrestricted"));
 }
 
 // === Scenario 4: allowlist + unknown — even if we pretend it's allowed,
