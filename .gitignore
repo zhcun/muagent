@@ -11,12 +11,15 @@
 **/__pycache__
 *.py[cod]
 
+# Internal design notes
+/design/
+
 # Node/npm local artifacts
 node_modules/
 npm-debug.log*
 *.tgz
 
-# Environment / secrets(不能被 git 追踪)
+# Environment / secrets
 .env
 .env.local
 .env.*.local

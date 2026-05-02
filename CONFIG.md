@@ -1,60 +1,86 @@
-# μAgent 配置参考
+# μAgent Configuration
 
-`muagent` 推荐用配置文件作为长期默认值, 用环境变量保存密钥, 用 CLI 参数做临时覆盖。
+`muagent` uses config files for durable defaults, environment variables for
+secrets, and CLI flags for temporary overrides.
 
-## 配置文件位置
+## Load Order
 
-默认读取顺序:
+Config sources are loaded in this order:
 
-1. 内置默认值
+1. Built-in defaults
 2. `~/.muagent/config.toml`
-3. 从当前目录向上查找的 `.muagent/config.toml`
-4. `.env`, `../.env`, `../../.env` 和进程环境变量
-5. CLI 参数
+3. `.muagent/config.toml` files found from the current directory upward
+4. `.env`, `../.env`, `../../.env`, and process environment variables
+5. CLI flags
 
-越靠后的来源优先级越高。`--config-file <FILE>` 或 `MUAGENT_CONFIG=<FILE>` 会只读取指定
-配置文件, 不再走默认的用户配置和项目配置搜索路径; 环境变量和 CLI 参数仍然会覆盖它。
+Later sources override earlier sources. `--config-file <FILE>` or
+`MUAGENT_CONFIG=<FILE>` loads only that config file instead of the default user
+and project config search paths. Environment variables and CLI flags still
+override the selected file.
 
-## 为什么是 TOML
+## Model Resolution
 
-当前 canonical config 选择 TOML, 主要原因是:
+Provider selection starts with `[model].provider` or top-level `provider`.
+`MUAGENT_PROVIDER` and `--provider` override that default for the current
+process.
 
-- Rust 生态主流配置就是 TOML, `Cargo.toml` 本身也是 TOML。
-- TOML 支持注释, 适合人手写; JSON 不支持注释, 更适合机器交换。
-- TOML 的类型规则比 YAML 更窄, 不容易出现缩进、隐式 bool/string 等问题。
-- 这个项目的配置是分层 profile, TOML 的 table 写法比 `.json` 更易读。
+For the active provider, `model` and `base_url` are resolved in this order:
 
-以后可以加 JSON/YAML import/export, 但建议内部主配置保持 TOML。
+1. CLI flag: `--model`, `--base-url`
+2. Generic environment variable: `MUAGENT_MODEL`, `MUAGENT_BASE_URL`
+3. Provider-specific environment variable, such as `OPENAI_MODEL`,
+   `OPENROUTER_MODEL`, or `GEMINI_BASE_URL`
+4. Config field scoped to the active provider
+5. Built-in provider default
 
-## 推荐书写顺序
+API keys and OAuth access tokens are resolved in this order:
 
-配置文件建议按“先选择模型, 再写模型能力, 再写运行行为和工具边界”的顺序写:
+1. `MUAGENT_API_KEY`
+2. The provider's default key environment variable, such as
+   `OPENROUTER_API_KEY` or `OPENAI_API_KEY`
+3. The environment variable named by `api_key_env`
+4. Literal `api_key` in config
 
-1. `[model]`: 默认 active provider
-2. `[providers.*]`: provider profile, 包括默认 model、base URL、key env
-3. `[providers.*.models."<model-id>".capabilities]`: 具体模型的能力覆盖
-4. `[runtime]`: cache / thinking 这类运行行为
-5. `[store]`: session 持久化位置
-6. `[fs]`, `[tools]`, `[skills]`, `[net_http]`, `[mcp]`: 工具和外部能力边界
-7. `[compaction]`, `[agent_md]`: 长上下文和项目指令
+This means a provider's standard key environment variable wins over a custom
+`api_key_env` for the same provider. If you need to test a different key, unset
+the standard key variable or use `MUAGENT_API_KEY` for that process.
 
-安装不会自动创建配置文件:
+## Why TOML
+
+TOML is the canonical config format because it is common in Rust projects,
+supports comments, has narrower type rules than YAML, and is readable for
+profile-oriented configuration.
+
+## Recommended File Shape
+
+Write config in this order:
+
+1. `[model]`: default active provider
+2. `[providers.*]`: provider profiles, including model, base URL, and key env
+3. `[providers.*.models."<model-id>".capabilities]`: per-model capability
+   overrides
+4. `[runtime]`: cache and thinking behavior
+5. `[store]`: session persistence
+6. `[fs]`, `[tools]`, `[skills]`, `[net_http]`, `[mcp]`: capability boundaries
+7. `[compaction]`, `[agent_md]`: long-context and project-instruction settings
+
+Create a user-level config:
 
 ```bash
 mkdir -p ~/.muagent
 $EDITOR ~/.muagent/config.toml
 ```
 
-项目专用配置可以放在项目内:
+Create a project-level config:
 
 ```bash
 mkdir -p .muagent
 $EDITOR .muagent/config.toml
 ```
 
-## 最小示例
+## Minimal Examples
 
-OpenRouter 作为默认 provider:
+OpenRouter as the default provider:
 
 ```toml
 [model]
@@ -65,8 +91,8 @@ model = "openai/gpt-5.4-nano"
 api_key_env = "OPENROUTER_API_KEY"
 ```
 
-OpenRouter 下某个具体模型的能力覆盖。这个配置只影响
-`moonshotai/kimi-k2.6`, 不影响 OpenRouter 里的其他模型:
+Per-model capability override for an OpenRouter model. This affects only
+`moonshotai/kimi-k2.6`:
 
 ```toml
 [providers.openrouter]
@@ -77,7 +103,7 @@ api_key_env = "OPENROUTER_API_KEY"
 vision = false
 ```
 
-OpenAI 作为默认 provider:
+OpenAI as the default provider:
 
 ```toml
 [model]
@@ -88,7 +114,7 @@ model = "gpt-5.4-nano"
 api_key_env = "OPENAI_API_KEY"
 ```
 
-OpenAI Codex / ChatGPT OAuth 作为默认 provider:
+OpenAI Codex / ChatGPT OAuth as the default provider:
 
 ```toml
 [model]
@@ -96,12 +122,11 @@ provider = "openai-codex"
 
 [providers.openai_codex]
 model = "gpt-5.5"
-# base_url 默认是 https://chatgpt.com/backend-api
+# base_url defaults to https://chatgpt.com/backend-api
 ```
 
-OpenAI Codex 推荐先运行 `codex login`, 让 `muagent` 复用 `~/.codex/auth.json`。
-也可以复用 pi-mono 的 `~/.pi/agent/auth.json`。手动 token override 也支持, 但过期刷新能力
-不如登录文件完整:
+Prefer `codex login` so `muagent` can reuse `~/.codex/auth.json`. Manual access
+token overrides are supported, but login files provide better refresh behavior:
 
 ```toml
 [model]
@@ -117,10 +142,10 @@ export OPENAI_CODEX_ACCESS_TOKEN=...
 export OPENAI_CODEX_ACCOUNT_ID=...
 ```
 
-## 多 Provider 示例
+## Multiple Providers
 
-这个配置默认走 OpenRouter, 但可以用 `--provider openai` 或 `--provider openai-codex`
-临时切换:
+This config uses OpenRouter by default and allows temporary switches with
+`--provider openai` or `--provider openai-codex`:
 
 ```toml
 [model]
@@ -150,12 +175,12 @@ api_key_env = "GEMINI_API_KEY"
 ```
 
 ```bash
-muagent "默认走 OpenRouter"
-muagent --provider openai "这次走 OpenAI"
-muagent --provider openai-codex "这次走 ChatGPT/Codex OAuth"
+muagent "Use the default OpenRouter profile."
+muagent --provider openai "Use OpenAI for this run."
+muagent --provider openai-codex "Use ChatGPT/Codex OAuth for this run."
 ```
 
-## 完整示例
+## Complete Example
 
 ```toml
 [model]
@@ -189,16 +214,15 @@ path = "jsonl:~/.muagent/sessions"
 
 [fs]
 root = "."
-# 如需关闭 shell 工具, 使用 tools.disabled = ["sh_exec"]。
 
 [tools]
-# 不写 enabled 时默认暴露所有已注册工具。
-# enabled = [] 表示显式不暴露任何工具。
+# Omit enabled to expose every registered tool.
+# enabled = [] explicitly exposes no tools.
 enabled = ["fs_read", "fs_write", "fs_list", "fs_stat", "fs_edit", "fs_rename", "fs_delete", "sh_exec"]
 disabled = ["net_http"]
 
 [skills]
-# 不写 enabled 时默认暴露所有自动发现的 skill。
+# Omit enabled to expose every discovered skill.
 disabled = []
 
 [net_http]
@@ -223,32 +247,97 @@ enabled = true
 max_bytes = 65536
 ```
 
-## Provider 字段
+## Common Recipes
 
-`[model]` 决定默认 active provider。`[providers.<id>]` 保存每个 provider 自己的 profile。
-当 active provider 等于 `[model].provider` 时, `[model]` 里的 `model`, `base_url`,
-`api_key_env`, `api_key` 会优先于 `[providers.<id>]`。如果通过 CLI 或环境变量切换到别的
-provider, 就读取对应的 `[providers.<id>]`。
+Use a `.env` file for secrets and keep config portable:
 
-支持字段:
+```bash
+cat > .env <<'EOF'
+OPENROUTER_API_KEY=sk-or-...
+OPENAI_API_KEY=sk-...
+EOF
+```
 
-| 字段 | 说明 |
+```toml
+[model]
+provider = "openrouter"
+
+[providers.openrouter]
+model = "openai/gpt-5.4-nano"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+Disable shell and network tools while keeping read-only filesystem inspection:
+
+```toml
+[tools]
+enabled = ["fs_read", "fs_list", "fs_stat"]
+disabled = ["sh_exec", "net_http"]
+```
+
+Use throwaway in-memory sessions:
+
+```toml
+[store]
+path = "memory"
+```
+
+Use a project-local session store:
+
+```toml
+[store]
+path = "jsonl:.muagent/sessions"
+```
+
+Tune compaction for a smaller context model:
+
+```toml
+[compaction]
+max_tokens = 32000
+threshold_ratio = 0.75
+keep_tail_turns = 4
+keep_recent_tokens = 8000
+summary_input_max_tokens = 24000
+summary_output_max_tokens = 4000
+```
+
+Run a cheaper summarizer than the main model:
+
+```bash
+export MUAGENT_SUMMARIZER_PROVIDER=openrouter
+export MUAGENT_SUMMARIZER_MODEL=openai/gpt-5.4-nano
+export MUAGENT_SUMMARIZER_API_KEY="$OPENROUTER_API_KEY"
+```
+
+## Provider Fields
+
+`[model]` selects the default active provider. `[providers.<id>]` stores a
+provider-specific profile. When the active provider is the same provider named
+in `[model].provider`, values in `[model]` override the matching provider
+profile fields. If a CLI flag or environment variable switches to another
+provider, `muagent` reads that provider's profile instead.
+
+Supported fields:
+
+| Field | Description |
 |---|---|
-| `provider` | 只在 `[model]` 下使用, 指定默认 provider |
-| `model` | 模型 ID |
-| `base_url` | API base URL; 不写则使用 provider 默认值 |
-| `api_key_env` | 从指定环境变量读取密钥或 access token |
-| `api_key` | 直接写密钥; 不推荐提交到 git |
+| `provider` | Only valid under `[model]`; selects the default provider |
+| `model` | Model ID |
+| `base_url` | API base URL; omitted values use the provider default |
+| `api_key_env` | Environment variable that contains an API key or access token |
+| `api_key` | Literal secret; avoid committing this to git |
 
-模型能力覆盖支持三层。优先级从高到低:
+Capability overrides are resolved in this order:
 
-1. `[providers.<id>.models."<model-id>".capabilities]`: 只影响这个 provider 下的这个模型
-2. `[model.capabilities]`: 只在 `[model].provider` 当前默认 provider 上生效的快捷覆盖
-3. `[providers.<id>.capabilities]`: provider-wide fallback, 只适合这个 provider profile 下所有模型能力都一致时使用
+1. `[providers.<id>.models."<model-id>".capabilities]`: one provider and one
+   model
+2. `[model.capabilities]`: shorthand for the default provider named in
+   `[model].provider`
+3. `[providers.<id>.capabilities]`: provider-wide fallback
 
-普通官方 provider 通常不需要写能力覆盖, 因为 adapter 会根据 provider/model 自动推断。
-OpenRouter 这类聚合 provider 下有很多模型, 不要把某一个模型的能力写到
-`[providers.openrouter.capabilities]`; 要写到模型级:
+Official providers usually do not need explicit capability overrides because
+the adapter infers them. Aggregator providers such as OpenRouter host many
+models with different capabilities, so model-level overrides are preferred:
 
 ```toml
 [providers.openrouter]
@@ -260,27 +349,29 @@ vision = false
 ctx_len = 262144
 ```
 
-TOML table 里的模型 ID 要加引号, 因为 OpenRouter 模型名通常包含 `/`, `.`, `-`。
+Quote model IDs in TOML table names because they often contain `/`, `.`, or
+`-`.
 
-支持字段:
+Capability fields:
 
-| 字段 | 别名 | 说明 |
+| Field | Aliases | Description |
 |---|---|---|
-| `vision` | `image`, `images` | 模型是否支持图片输入; `moonshotai/kimi-k2.6` 这类非视觉模型可设为 `false` |
-| `ctx_len` | `context_window`, `context_length`, `max_context_tokens` | 上下文窗口 token 数 |
-| `prompt_cache` | `cache` | 高级覆盖项; 默认会按 provider/model 自动开启或关闭, 普通配置不用写 |
-| `reasoning` | `thinking` | 低层 wire 能力: `none`, `supported`, `replay`; 不是 `high/medium/low` 这种推理强度 |
-| `native_tool_use` | `tool_use`, `tool_calling` | 低层 adapter wire hint; 要关闭工具请用 `[tools]` |
-| `json_schema_mode` | `json_schema` | 是否支持 JSON schema 输出约束 |
-| `streaming` | `stream` | 是否支持 streaming; 当前 CLI 还未把 streaming 作为主路径 |
+| `vision` | `image`, `images` | Whether the model supports image input |
+| `ctx_len` | `context_window`, `context_length`, `max_context_tokens` | Context window size in tokens |
+| `prompt_cache` | `cache` | Low-level prompt-cache capability override |
+| `reasoning` | `thinking` | Wire capability: `none`, `supported`, or `replay` |
+| `native_tool_use` | `tool_use`, `tool_calling` | Adapter wire hint for native tool calls |
+| `json_schema_mode` | `json_schema` | Whether JSON-schema constrained output is supported |
+| `streaming` | `stream` | Whether streaming is supported |
 
-兼容旧值: `reasoning = "no_replay"` 等价于 `reasoning = "supported"`,
-`reasoning = "full_replay"` 等价于 `reasoning = "replay"`。这不是运行时 thinking
-effort; 如果要请求高强度推理, 写 `[runtime] thinking = "high"`。
+Compatibility aliases: `reasoning = "no_replay"` is equivalent to
+`reasoning = "supported"`, and `reasoning = "full_replay"` is equivalent to
+`reasoning = "replay"`. This is not runtime thinking effort. Use
+`[runtime] thinking = "high"` to request high reasoning effort.
 
-Provider ID:
+Provider IDs:
 
-| Provider | 配置值 | 表名 | 默认模型 | 默认 base URL | 默认 key env |
+| Provider | Config value | Table | Default model | Default base URL | Default key env |
 |---|---|---|---|---|---|
 | OpenAI | `openai` | `[providers.openai]` | `gpt-5.4-nano` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
 | OpenAI Codex | `openai-codex`, `openai_codex`, `codex`, `chatgpt` | `[providers.openai_codex]` | `gpt-5.5` | `https://chatgpt.com/backend-api` | `OPENAI_CODEX_ACCESS_TOKEN` |
@@ -290,45 +381,48 @@ Provider ID:
 
 ## OpenAI Codex OAuth
 
-`openai-codex` 不是普通 OpenAI API key provider。它调用 ChatGPT backend 的
-`/codex/responses` endpoint, 使用 OAuth access token。
+`openai-codex` is not a standard OpenAI API-key provider. It calls the ChatGPT
+backend `/codex/responses` endpoint with an OAuth access token.
 
-认证解析顺序:
+Credential lookup order:
 
-1. 配置里的 `api_key` 或 `api_key_env`
-2. `MUAGENT_CODEX_ACCESS_TOKEN` 或 `OPENAI_CODEX_ACCESS_TOKEN`
-3. `MUAGENT_CODEX_AUTH_FILE` 或 `MUAGENT_OPENAI_CODEX_AUTH_FILE`
+1. Any access token resolved by the general model config path. In practice this
+   includes `MUAGENT_API_KEY`, `OPENAI_CODEX_ACCESS_TOKEN`, the configured
+   `api_key_env`, or literal `api_key`.
+2. `MUAGENT_CODEX_ACCESS_TOKEN` or `OPENAI_CODEX_ACCESS_TOKEN`
+3. `MUAGENT_CODEX_AUTH_FILE` or `MUAGENT_OPENAI_CODEX_AUTH_FILE`
 4. `~/.muagent/auth.json`
 5. `~/.pi/agent/auth.json`
 6. `~/.codex/auth.json`
 
-手动 token 需要 account id。可以通过 JWT 自动提取, 也可以显式设置:
+Manual tokens need an account ID. `muagent` can usually extract it from the JWT,
+or you can set it explicitly:
 
 ```bash
 export OPENAI_CODEX_ACCESS_TOKEN=...
 export OPENAI_CODEX_ACCOUNT_ID=...
 ```
 
-如果使用 auth 文件, 过期 token 会尝试用 refresh token 刷新并写回原文件。推荐方式:
+If an auth file is used, expired tokens are refreshed with the refresh token and
+written back to the same file when possible. Recommended flow:
 
 ```bash
 codex login
-muagent --provider openai-codex "用 ChatGPT/Codex OAuth 跑一次"
+muagent --provider openai-codex "Run one task with ChatGPT/Codex OAuth."
 ```
 
-## 文件和 Shell
+## Files And Shell
 
 ```toml
 [fs]
 root = "."
-# sh_exec 默认注册; 如需关闭, 使用 tools.disabled = ["sh_exec"]。
 ```
 
-| 字段 | 默认值 | 环境变量 | CLI |
+| Field | Default | Environment | CLI |
 |---|---:|---|---|
-| `fs.root` | 当前工作目录 | `MUAGENT_ROOT` | `--root <DIR>` |
+| `fs.root` | Current working directory | `MUAGENT_ROOT` | `--root <DIR>` |
 
-需要关闭 shell 工具时:
+Disable shell execution:
 
 ```bash
 muagent --disable-tools sh_exec
@@ -338,21 +432,21 @@ muagent --disable-tools sh_exec
 
 ```toml
 store = "jsonl:~/.muagent/sessions"
-# 或:
+# or:
 [store]
 path = "jsonl:~/.muagent/sessions"
 ```
 
-| 值 | 说明 |
+| Value | Description |
 |---|---|
-| 不配置 | 默认 `jsonl:~/.muagent/sessions` |
-| `memory` 或空字符串 | 只在内存里保存, 退出即丢失 |
-| `jsonl:/path/to/store` | JSONL 持久化 |
-| `/path/to/store` | 等价于 JSONL 持久化 |
+| Omitted | Defaults to `jsonl:~/.muagent/sessions` |
+| `memory` or empty string | In-memory sessions only; discarded on exit |
+| `jsonl:/path/to/store` | JSONL persistence |
+| `/path/to/store` | Equivalent to JSONL persistence |
 
-环境变量: `MUAGENT_STORE`; CLI: `--store <SPEC>`。
+Environment variable: `MUAGENT_STORE`. CLI flag: `--store <SPEC>`.
 
-## Tools 和 Skills
+## Tools And Skills
 
 ```toml
 [tools]
@@ -364,10 +458,10 @@ enabled = ["filesystem"]
 disabled = ["marketing-ideas"]
 ```
 
-`enabled` 不写表示使用默认行为: tools 暴露所有已注册工具, skills 暴露所有已发现 skill。
-`enabled = []` 是有效配置, 表示显式暴露空集合。
+Omitting `enabled` uses the default behavior: all registered tools and all
+discovered skills are exposed. `enabled = []` is meaningful and exposes none.
 
-| 配置 | 环境变量 | CLI |
+| Config | Environment | CLI |
 |---|---|---|
 | `tools.enabled` | `MUAGENT_TOOLS` | `--tools`, `--enable-tools` |
 | `tools.disabled` | `MUAGENT_DISABLE_TOOLS` | `--disable-tools` |
@@ -375,9 +469,19 @@ disabled = ["marketing-ideas"]
 | `skills.disabled` | `MUAGENT_DISABLE_SKILLS` | `--disable-skills` |
 | `capabilities.skill_autoload` | `MUAGENT_SKILL_AUTOLOAD` | `--no-skills-autoload` |
 
-兼容别名也支持: `[capabilities] tools`, `disabled_tools`, `skills`, `disabled_skills`。
+Compatibility aliases are also supported: `[capabilities] tools`,
+`disabled_tools`, `skills`, and `disabled_skills`.
 
-## net_http 和 MCP
+The allowlist is applied before the denylist. For example, this exposes only
+the three read-only filesystem tools and then removes `fs_stat`:
+
+```toml
+[tools]
+enabled = ["fs_read", "fs_list", "fs_stat"]
+disabled = ["fs_stat"]
+```
+
+## net_http And MCP
 
 ```toml
 [net_http]
@@ -387,9 +491,9 @@ enabled = true
 sse_endpoints = ["http://127.0.0.1:10086/sse"]
 ```
 
-| 配置 | 默认值 | 环境变量 | CLI |
+| Config | Default | Environment | CLI |
 |---|---:|---|---|
-| `net_http.enabled` | `true` | `MUAGENT_NET_HTTP` | 可用 `--disable-tools net_http` 隐藏 |
+| `net_http.enabled` | `true` | `MUAGENT_NET_HTTP` | Hide with `--disable-tools net_http` |
 | `mcp.sse_endpoints` / `mcp.sse` | `[]` | `MUAGENT_MCP_SSE` | `--mcp-sse <URLS>` |
 
 ## Runtime
@@ -400,18 +504,19 @@ cache = true
 thinking = "high"
 ```
 
-| 字段 | 默认值 | 环境变量 | CLI |
+| Field | Default | Environment | CLI |
 |---|---:|---|---|
 | `runtime.cache` | `true` | `MUAGENT_CACHE` | `--cache auto`, `--cache off` |
 | `runtime.thinking` | `high` | `MUAGENT_THINKING` | `--thinking <MODE>` |
 
-`thinking` 支持: `off`, `auto`, `minimal`, `low`, `medium`, `high`, `max`, `xhigh`。
-布尔值支持: `on`, `1`, `true`, `yes`, `enabled`, `auto`, `off`, `0`, `false`, `no`,
-`disabled`。
+`thinking` supports `off`, `auto`, `minimal`, `low`, `medium`, `high`, `max`,
+and `xhigh`. Boolean parsing also accepts `on`, `1`, `true`, `yes`, `enabled`,
+`auto`, `off`, `0`, `false`, `no`, and `disabled`.
 
-这里的 `thinking = "high"` 是运行时推理强度。模型能力里的
-`[providers.*.models."<model>".capabilities] reasoning = "supported"` 只是说明底层
-adapter 是否会发送 reasoning 字段, 两者不是同一个配置。
+`runtime.thinking = "high"` is runtime reasoning effort. A model capability
+override such as
+`[providers.*.models."<model>".capabilities] reasoning = "supported"` only
+controls whether the adapter can send reasoning fields.
 
 ## Compaction
 
@@ -428,7 +533,7 @@ restart_repair_window_tokens = 300000
 max_summary_rounds = 4
 ```
 
-| 字段 | 默认值 | 环境变量 |
+| Field | Default | Environment |
 |---|---:|---|
 | `compaction.max_tokens` | `156000` | `MUAGENT_MAX_TOKENS` |
 | `compaction.threshold_ratio` | `0.8` | `MUAGENT_COMPACTION_THRESHOLD` |
@@ -440,7 +545,7 @@ max_summary_rounds = 4
 | `compaction.restart_repair_window_tokens` | `300000` | `MUAGENT_RESTART_REPAIR_WINDOW_TOKENS` |
 | `compaction.max_summary_rounds` | `4` | `MUAGENT_MAX_SUMMARY_ROUNDS` |
 
-独立 summarizer 目前只通过环境变量配置:
+The dedicated summarizer is configured only through environment variables:
 
 ```bash
 export MUAGENT_SUMMARIZER_MODEL=openai/gpt-5.4-nano
@@ -449,9 +554,10 @@ export MUAGENT_SUMMARIZER_BASE_URL=https://openrouter.ai/api/v1
 export MUAGENT_SUMMARIZER_API_KEY=sk-or-...
 ```
 
-只设置 `MUAGENT_SUMMARIZER_MODEL` 时, provider/base_url/key 会尽量继承主模型环境。
+When only `MUAGENT_SUMMARIZER_MODEL` is set, provider, base URL, and key are
+inherited from the main model where possible.
 
-## Agent Instruction 文件
+## Agent Instruction Files
 
 ```toml
 [agent_md]
@@ -459,22 +565,23 @@ enabled = true
 max_bytes = 65536
 ```
 
-启动时会读取工作区祖先和用户配置目录里的 `AGENT.md`, `AGENTS.md`, `CLAUDE.md`。
+At startup, `muagent` reads `AGENT.md`, `AGENTS.md`, and `CLAUDE.md` from
+workspace ancestors and the user config directory.
 
-| 字段 | 默认值 | 环境变量 |
+| Field | Default | Environment |
 |---|---:|---|
 | `agent_md.enabled` | `true` | `MUAGENT_AGENT_MD` |
 | `agent_md.max_bytes` / `agent_md.max_bytes_per_file` | `65536` | `MUAGENT_AGENT_MD_MAX_BYTES` |
 
-## 常用环境变量
+## Common Environment Variables
 
-| 环境变量 | 说明 |
+| Environment variable | Description |
 |---|---|
-| `MUAGENT_CONFIG` | 指定单个 config 文件 |
-| `MUAGENT_PROVIDER` | active provider |
-| `MUAGENT_MODEL` | active model |
-| `MUAGENT_BASE_URL` | active provider base URL |
-| `MUAGENT_API_KEY` | 覆盖所有普通 provider key |
+| `MUAGENT_CONFIG` | Single config file path |
+| `MUAGENT_PROVIDER` | Active provider |
+| `MUAGENT_MODEL` | Active model |
+| `MUAGENT_BASE_URL` | Active provider base URL |
+| `MUAGENT_API_KEY` | Override key for standard providers |
 | `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` | OpenAI |
 | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_BASE_URL` | OpenRouter |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL` | Anthropic |
@@ -482,16 +589,16 @@ max_bytes = 65536
 | `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_ACCOUNT_ID`, `OPENAI_CODEX_MODEL`, `OPENAI_CODEX_BASE_URL` | OpenAI Codex |
 | `MUAGENT_CODEX_ACCESS_TOKEN`, `MUAGENT_CODEX_ACCOUNT_ID`, `MUAGENT_CODEX_REFRESH_TOKEN` | OpenAI Codex override |
 | `MUAGENT_STORE` | Session store |
-| `MUAGENT_ROOT` | 文件工具根目录 |
-| `MUAGENT_NET_HTTP` | 是否注册 `net_http` |
-| `MUAGENT_TOOLS`, `MUAGENT_DISABLE_TOOLS` | 工具 allowlist / denylist |
-| `MUAGENT_SKILLS`, `MUAGENT_DISABLE_SKILLS`, `MUAGENT_SKILL_AUTOLOAD` | skill 配置 |
-| `MUAGENT_CACHE`, `MUAGENT_THINKING` | runtime 配置 |
-| `MUAGENT_LOG` | tracing filter, 例如 `muagent=debug,info` |
-| `MUAGENT_MAX_STEPS` | agent step safety limit |
-| `MUAGENT_BAD_TOOL_EVENT_LIMIT` | 连续 timeout/security/error tool 事件熔断 |
+| `MUAGENT_ROOT` | File-tool root |
+| `MUAGENT_NET_HTTP` | Whether `net_http` is registered |
+| `MUAGENT_TOOLS`, `MUAGENT_DISABLE_TOOLS` | Tool allowlist and denylist |
+| `MUAGENT_SKILLS`, `MUAGENT_DISABLE_SKILLS`, `MUAGENT_SKILL_AUTOLOAD` | Skill settings |
+| `MUAGENT_CACHE`, `MUAGENT_THINKING` | Runtime settings |
+| `MUAGENT_LOG` | Tracing filter, for example `muagent=debug,info` |
+| `MUAGENT_MAX_STEPS` | Agent step safety limit |
+| `MUAGENT_BAD_TOOL_EVENT_LIMIT` | Fuse for consecutive timeout/security/error tool events |
 
-## CLI 覆盖
+## CLI Overrides
 
 ```bash
 muagent \
@@ -500,15 +607,42 @@ muagent \
   --model gpt-5.4-nano \
   --root . \
   --disable-tools net_http \
-  "跑一下相关测试"
+  "Run the relevant tests."
 ```
 
-CLI 参数只影响当前进程, 不会写回配置文件。REPL/TUI 里的 `/model` 和 `/provider` 也是当前
-session 临时切换, 不会修改 `config.toml`。
+CLI flags affect only the current process. `/model` and `/provider` inside the
+REPL/TUI affect only the current session and do not edit `config.toml`.
 
-## TOML 解析细节
+## Diagnostics
 
-- key 会转成小写, `-` 会规范化成 `_`; `openai-codex` 和 `openai_codex` 等价。
-- list 字段可以写 TOML array, 环境变量和 CLI list 使用逗号分隔。
-- 空数组有意义: `enabled = []` 表示显式暴露空集合。
-- 未识别 key 会被忽略并写 warning log。
+Useful checks:
+
+```bash
+muagent --help
+MUAGENT_LOG=muagent=debug,info muagent --provider openrouter exec "hello"
+muagent --config-file ~/.muagent/config.toml exec "hello"
+```
+
+Common failures:
+
+- `unknown provider`: use one of `openai`, `openai-codex`, `anthropic`,
+  `google`, or `openrouter`.
+- `config file not found`: `--config-file` and `MUAGENT_CONFIG` require the
+  file to exist.
+- `invalid runtime.cache` or `invalid net_http.enabled`: use supported boolean
+  values such as `true`, `false`, `on`, or `off`.
+- `unknown thinking value`: use `off`, `auto`, `minimal`, `low`, `medium`,
+  `high`, `max`, or `xhigh`.
+- Authentication failures: check `MUAGENT_API_KEY` first, then the
+  provider-specific key variable, then the config `api_key_env` target.
+- Unexpected tool exposure: inspect both `enabled` and `disabled`; a denylist
+  entry removes a tool even when it is also in the allowlist.
+
+## TOML Parsing Notes
+
+- Keys are lowercased and `-` is normalized to `_`; `openai-codex` and
+  `openai_codex` are equivalent.
+- List fields can be TOML arrays. Environment variables and CLI lists are
+  comma-separated.
+- Empty arrays are meaningful: `enabled = []` explicitly exposes no entries.
+- Unknown keys are ignored and reported through warning logs.

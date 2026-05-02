@@ -1,14 +1,18 @@
-# M0 运行说明
+# Runbook
 
-## 前置:安装 Rust
+This file is a short command reference for building, testing, running, and
+troubleshooting the current checkout. User-facing CLI usage is in
+[USAGE.md](USAGE.md).
+
+## Install Rust
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
-rustc --version      # 期望 >= 1.75
+rustc --version      # expected: 1.75 or newer
 ```
 
-## 编译 + 跑测试
+## Build And Test
 
 ```bash
 cd /Users/mike/jiang/muagent
@@ -16,121 +20,165 @@ cargo build
 cargo test
 ```
 
-期望输出:
-- 主 crate `muagent` 编译通过
-- 非 ignored 测试全部通过;真实 provider/live 测试默认 ignored
+Expected result:
 
-## 跑单个测试
+- the `muagent` crate builds
+- non-ignored tests pass
+- live provider tests stay ignored unless explicitly requested with credentials
+
+## Run Focused Tests
 
 ```bash
 cargo test -p muagent --test m0_core t1_tool_batch_multi_call_sequential
 cargo test -p muagent --test m0_shell t6_panic_becomes_tool_result
+cargo test --test cli_smoke
 ```
 
-## 当前目录布局
+## Run The CLI From Source
 
+```bash
+cargo run --bin muagent -- --help
+cargo run --bin muagent -- exec "Summarize this repository."
+cargo run --bin muagent -- repl
 ```
+
+## Repository Layout
+
+```text
 muagent/
-├── Cargo.toml                             # 主 crate: muagent
+├── Cargo.toml                             # main crate
 ├── src/
-│   ├── lib.rs                             # 模块导出 + prelude
+│   ├── lib.rs                             # module exports and prelude
 │   ├── bin/
-│   │   ├── muagent.rs                     # CLI
-│   │   └── muagent-mcp-test-server.rs     # MCP 测试 server
-│   ├── core/                              # Runner / RunState / trait / protocol
-│   ├── runtime/                           # executor / tool-set provider
-│   ├── providers/                         # OpenAI / Anthropic / Google adapters
-│   ├── storage/                           # JSONL / memory SessionStore
-│   ├── adapters/                          # fs / process / reqwest / linux adapters
-│   ├── capabilities/                      # builtin tools / skills / MCP
-│   ├── sessions/                          # session manager / archive / compaction
+│   │   ├── muagent.rs                     # CLI entry point
+│   │   └── muagent-mcp-test-server.rs     # MCP test server
+│   ├── core/                              # Runner, RunState, traits, protocol
+│   ├── runtime/                           # executor and tool-set provider
+│   ├── providers/                         # OpenAI, Anthropic, Google adapters
+│   ├── storage/                           # JSONL and memory SessionStore
+│   ├── adapters/                          # filesystem, process, reqwest adapters
+│   ├── capabilities/                      # built-in tools, skills, MCP
+│   ├── sessions/                          # session manager, archive, compaction
 │   ├── config.rs
-│   ├── setup.rs                           # 默认装配
+│   ├── setup.rs                           # default wiring
 │   └── prompts/
 ├── tests/                                 # integration tests
-├── evals/                                 # local 22-case benchmark binary
-└── design/                                # architecture notes
+└── evals/                                 # local benchmark binary
 ```
 
-## M0 验收测试清单
+## Selected Integration Tests
 
-**Core(mock 实现)**:
-1. `t1_tool_batch_multi_call_sequential` — LLM 返 `[a,b,c]` → 三个都执行 → 全部 ToolResult 进 history → 回 ModelTurn → Done
-2. `t2_at_most_once_interrupt` — AtMostOnce 工具模拟"上次中断在 ToolIntent" → on_tool_intent_recover 注入 interrupted ToolResult → LLM 收到后继续
-3. `t3_cancel_triggers_paused` — `runner.cancel()` → 下次 step 开头 → `Step::Paused { HostRequested }` → persist
-4. `t4_event_persistence_and_replay` — 事件 `(run_id, seq)` 严格单调;`query_events(run_id, since)` 可任意切片;crash injector 让 save 失败时 store 端事件数不增
-5. `t5_schema_migration` — 当前 schema 正常解析;过高 schema → `Incompatible`;v0 → `Corrupt`(未实现)
+Core tests with mock implementations:
 
-**Shell(DefaultToolExecutor)**:
-6. `t6_panic_becomes_tool_result` — tool `panic!("boom")` → catch_unwind → `ToolResult { ok:false, retryable:true, content:"internal: boom" }`
-7. `t7_guard_deny_becomes_tool_result` — guard 返 Deny → `ToolResult { ok:false, retryable:false, hint:"..." }`
-8. `t8_timeout_becomes_tool_result` — tool 跑 5s 但 timeout=50ms → `ToolResult { ok:false, retryable:true, content:"timeout" }`
+1. `t1_tool_batch_multi_call_sequential`: a model returns three tool calls; all
+   run sequentially; every `ToolResult` enters history; the run returns to
+   `ModelTurn` and completes.
+2. `t2_at_most_once_interrupt`: recovery from an interrupted `ToolIntent`
+   injects an interrupted `ToolResult` so the model can continue safely.
+3. `t3_cancel_triggers_paused`: `runner.cancel()` causes the next step to
+   persist `Step::Paused { HostRequested }`.
+4. `t4_event_persistence_and_replay`: `(run_id, seq)` events are monotonic;
+   `query_events(run_id, since)` can slice the stream; failed saves do not
+   append partial events.
+5. `t5_schema_migration`: current schema parses, future schema reports
+   `Incompatible`, and v0 reports `Corrupt`.
 
-## 编译错误排查
+Shell/default executor tests:
 
-- `command not found: cargo` → 装 rustup,见上
-- `error[E0432]: unresolved import` → 检查 `src/lib.rs` / 对应 `mod.rs` 是否导出了模块
-- `macro resolution` / `tokio` 相关 → 确保 Cargo.toml 的 tokio features 含 `macros` + `rt` + `time`
-- 任何 cargo 错误贴出来,我可以逐条修
+6. `t6_panic_becomes_tool_result`: a panicking tool becomes a retryable internal
+   `ToolResult` error.
+7. `t7_guard_deny_becomes_tool_result`: guard denial becomes a non-retryable
+   `ToolResult`.
+8. `t8_timeout_becomes_tool_result`: timeout becomes a retryable timeout
+   `ToolResult`.
 
-## Model providers(M1 已接)
+## Troubleshooting
 
-| Provider | 模块 | 备注 |
+- `command not found: cargo`: install Rust with rustup and reload the shell
+  environment.
+- `error[E0432]: unresolved import`: check the corresponding `mod.rs` or
+  `src/lib.rs` export.
+- Macro resolution or Tokio runtime errors: check the `tokio` features in
+  `Cargo.toml`; tests generally need `macros`, `rt`, and `time`.
+- Live provider failures: confirm the provider key, model, base URL, and
+  whether the test is expected to be ignored by default.
+
+## Providers
+
+| Provider | Module | Notes |
 |---|---|---|
-| **OpenAI** | `muagent::providers::openai` | chat/completions + tool_use + 多模态 image_url |
-| **Ollama**(本地) | `muagent::providers::openai` | `base_url = "http://127.0.0.1:11434/v1"`,`api_key = None` |
-| **OpenRouter** | `muagent::providers::openai` | `base_url = "https://openrouter.ai/api/v1"` + OpenRouter key |
-| **Anthropic Claude** | `muagent::providers::anthropic` | Messages API;tool_use / tool_result blocks;base64 image |
-| **Google Gemini** | `muagent::providers::google` | generateContent;functionCall / inlineData;systemInstruction |
+| OpenAI | `muagent::providers::openai` | Chat/completions-compatible adapter with tool use and image input |
+| Ollama | `muagent::providers::openai` | Use `base_url = "http://127.0.0.1:11434/v1"` and no API key |
+| OpenRouter | `muagent::providers::openai` | Use `https://openrouter.ai/api/v1` with an OpenRouter key |
+| Anthropic Claude | `muagent::providers::anthropic` | Messages API with tool and image blocks |
+| Google Gemini | `muagent::providers::google` | `generateContent`, function calls, inline data, and system instructions |
 
-多模态:`Content::Parts` 含 `ContentPart::Image { b64 \| uri, mime }` 时,所有 adapter 都会按各自 API 的 image 格式编码。
+When `Content::Parts` includes `ContentPart::Image { b64 | uri, mime }`, each
+adapter encodes the image in the format required by that provider API.
 
-用法示例(Rust):
+Rust adapter example:
+
 ```rust
-use muagent::providers::{AnthropicAdapter, GoogleGeminiAdapter, OpenAiAdapter};
 use muagent::adapters::ReqwestEgress;
+use muagent::providers::{AnthropicAdapter, GoogleGeminiAdapter, OpenAiAdapter};
 use std::sync::Arc;
 
 let net = Arc::new(ReqwestEgress::new()?);
 
-// OpenAI
-let a1 = OpenAiAdapter::new(net.clone(), "https://api.openai.com/v1", "gpt-5.4-nano", Some("sk-...".into()));
+let openai = OpenAiAdapter::new(
+    net.clone(),
+    "https://api.openai.com/v1",
+    "gpt-5.4-nano",
+    Some("sk-...".into()),
+);
 
-// Ollama(零配置本地)
-let a2 = OpenAiAdapter::new(net.clone(), "http://127.0.0.1:11434/v1", "llama3.2", None);
+let ollama = OpenAiAdapter::new(
+    net.clone(),
+    "http://127.0.0.1:11434/v1",
+    "llama3.2",
+    None,
+);
 
-// OpenRouter(单 key 访问几十个模型)
-let a3 = OpenAiAdapter::new(net.clone(), "https://openrouter.ai/api/v1",
-    "anthropic/claude-haiku-4.5", Some("sk-or-...".into()));
+let openrouter = OpenAiAdapter::new(
+    net.clone(),
+    "https://openrouter.ai/api/v1",
+    "anthropic/claude-haiku-4.5",
+    Some("sk-or-...".into()),
+);
 
-// Anthropic 原生
-let a4 = AnthropicAdapter::new(net.clone(), "https://api.anthropic.com",
-    "claude-haiku-4-5", "sk-ant-...");
+let anthropic = AnthropicAdapter::new(
+    net.clone(),
+    "https://api.anthropic.com",
+    "claude-haiku-4-5",
+    "sk-ant-...",
+);
 
-// Google Gemini
-let a5 = GoogleGeminiAdapter::new(net.clone(),
+let google = GoogleGeminiAdapter::new(
+    net.clone(),
     "https://generativelanguage.googleapis.com",
-    "gemini-3.1-flash-lite-preview", "AIza...");
+    "gemini-3.1-flash-lite-preview",
+    "AIza...",
+);
 ```
 
-## 本地 Agent Benchmark
+## Local Agent Benchmark
 
-仓库现在带了一个轻量 benchmark runner:
+List tasks:
 
 ```bash
 cargo run -p muagent --bin agent_bench -- --list
 ```
 
-默认会优先读取现有 provider 环境变量;如果是 OpenAI 路线,默认模型是 `gpt-5.4-nano`;如果是 OpenRouter 路线,默认模型是 `openai/gpt-5.4-nano`。
-
-示例:
+Run the full local benchmark:
 
 ```bash
-# 直接跑整套 22 题,其中包含 2 个真实 PNG 图片输入任务
 OPENAI_API_KEY=... \
 cargo run -p muagent --bin agent_bench --
+```
 
-# 指定模型 / 只跑某一题 / 重复 3 次
+Run one task multiple times:
+
+```bash
 OPENAI_API_KEY=... \
 cargo run -p muagent --bin agent_bench -- \
   --provider openai \
@@ -139,80 +187,11 @@ cargo run -p muagent --bin agent_bench -- \
   --runs 3
 ```
 
-这个 benchmark 不是直接内嵌 GAIA/WebArena 数据集,而是参考 GAIA 那类“答案明确、需要工具、可验证”的 agent 任务设计成本地可复现小套件,避免外部网站和大数据集把评测稳定性拖垮。参考:
+The benchmark is a small, reproducible local suite inspired by agent benchmarks
+with verifiable answers. It is not a bundled copy of GAIA or WebArena.
+
+References:
+
 - GAIA paper: https://huggingface.co/papers/2311.12983
 - GAIA dataset card: https://huggingface.co/datasets/gaia-benchmark/GAIA
 - OpenAI models page: https://platform.openai.com/docs/models
-
-## CLI 配置文件
-
-CLI 会按顺序读取用户配置和项目配置:
-
-1. `~/.muagent/config.toml`
-2. 从当前目录向上查找的 `.muagent/config.toml`(越靠近当前项目优先级越高)
-3. `--config-file <FILE>` 或 `MUAGENT_CONFIG=<FILE>` 可指定单个配置文件
-
-优先级是:命令行参数 / 环境变量 / `.env` > 项目配置 > 用户配置 > 内置默认值。
-配置文件使用标准 TOML。空数组是有效配置:例如 `enabled = []`
-表示显式不暴露任何工具;不写 `enabled` 才表示使用默认的"全部已注册工具"。
-
-示例:
-
-```toml
-[model]
-provider = "openrouter"
-model = "openai/gpt-5.4-nano"
-# 推荐把 secret 放在环境变量里;也可以直接写 api_key。
-api_key_env = "OPENROUTER_API_KEY"
-
-[providers.openrouter]
-# provider-specific profile. 上面的 [model] 是默认 active provider 的快捷层;
-# 切到别的 provider 时不会泄漏 openrouter 的 model/api_key。
-# base_url = "https://openrouter.ai/api/v1"
-# model = "openai/gpt-5.4-nano"
-
-[providers.google]
-model = "gemini-3.1-flash-lite-preview"
-api_key_env = "GEMINI_API_KEY"
-
-[tools]
-# 不写 enabled 时默认暴露所有已注册工具。
-enabled = ["fs_read", "fs_write", "fs_list", "sh_exec", "net_http"]
-disabled = ["net_http"]
-
-[skills]
-enabled = ["filesystem"]
-disabled = ["marketing-ideas"]
-
-[fs]
-root = "."
-# sh_exec 默认注册; 如需关闭, 在 tools.disabled 中加入 "sh_exec"。
-
-[compaction]
-max_tokens = 156000
-threshold_ratio = 0.8
-keep_tail_turns = 4
-summary_input_max_tokens = 100000
-summary_output_max_tokens = 8000
-restart_repair_window_tokens = 300000
-max_summary_rounds = 4
-
-[runtime]
-cache = true
-thinking = "high"
-
-[agent_md]
-enabled = true
-max_bytes = 65536
-```
-
-## M0 后续(M1)
-
-按 11-roadmap §11.3:
-- SessionManager / CompactionStrategy / SessionArchive 分片
-- McpClient + HttpSseTransport + StdioTransport
-- Skill trait + `#[skill]` 宏
-- 几个内置 tool:`fs.*` / `sh.exec` / `net.http`
-- CLI REPL 通过 `/new /list /continue /fork /search`
-
-M0 绿灯之后开始 M1。

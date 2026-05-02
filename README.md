@@ -1,22 +1,24 @@
 # μAgent
 
-μAgent 是一个用 Rust 写的 on-device agent runtime。当前仓库提供可直接运行的
-`muagent` CLI, 支持默认 TUI、单次任务、行模式 REPL、持久化 session、自动压缩、
-内置文件/网络/shell 工具、skills 自动加载, 以及 OpenAI / OpenRouter / Anthropic /
-Google / OpenAI Codex OAuth 等模型后端。
+μAgent is a Rust-based agent runtime for working inside a local workspace. The
+repository includes the `muagent` CLI with a terminal UI, one-shot execution,
+a line-mode REPL, persistent sessions, automatic context compaction, built-in
+file/network/shell tools, skill loading, and model adapters for OpenAI,
+OpenRouter, Anthropic, Google, and OpenAI Codex OAuth.
 
-项目仍在快速迭代。这个 README 只保留新使用者入口; 更完整的使用、配置、构建和开发说明
-请看后面的文档索引。
+This README is the user entry point. The linked documents contain the complete
+usage, configuration, build, and development references.
 
-## 快速开始
+## Quick Start
 
-前置要求:
+Requirements:
 
 - Node.js 16+
 - Rust/Cargo 1.75+
-- 至少一个模型 provider 的凭证, 例如 `OPENROUTER_API_KEY` 或 `OPENAI_API_KEY`
+- Credentials for at least one model provider, such as `OPENROUTER_API_KEY` or
+  `OPENAI_API_KEY`
 
-如果机器还没有 Rust/Cargo, 先安装 Rust toolchain:
+Install Rust first if it is not already available:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -25,6 +27,8 @@ cargo --version
 rustc --version
 ```
 
+Install the CLI from this checkout:
+
 ```bash
 git clone <repo-url>
 cd muagent
@@ -32,21 +36,22 @@ npm install -g .
 muagent --help
 ```
 
-`npm install -g .` 是本地安装, 不需要发布 npm 包; 安装时会调用 Cargo 构建
-`muagent` native binary。也可以绕过 npm 直接用 Cargo 安装:
+`npm install -g .` performs a local install. It does not require publishing to
+the npm registry; the package install step builds the native Rust `muagent`
+binary with Cargo. You can also install directly with Cargo:
 
 ```bash
 cargo install --path . --bin muagent --force
 ```
 
-创建用户级配置:
+Create a user-level config file:
 
 ```bash
 mkdir -p ~/.muagent
 $EDITOR ~/.muagent/config.toml
 ```
 
-最小 OpenRouter 配置:
+Minimal OpenRouter config:
 
 ```toml
 [model]
@@ -57,8 +62,9 @@ model = "openai/gpt-5.4-nano"
 api_key_env = "OPENROUTER_API_KEY"
 ```
 
-OpenRouter 下某个具体模型的能力覆盖要写到模型级, 不要写到整个 provider。例如
-`moonshotai/kimi-k2.6` 不支持图片输入:
+Provider-wide capability overrides are rarely correct for aggregator providers.
+For example, if a specific OpenRouter model does not support image input, scope
+the override to that model:
 
 ```toml
 [providers.openrouter]
@@ -69,85 +75,85 @@ api_key_env = "OPENROUTER_API_KEY"
 vision = false
 ```
 
-密钥建议放在环境变量或 `.env`:
+Keep secrets in environment variables or `.env`:
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 ```
 
-运行一次任务:
+Run one task:
 
 ```bash
-muagent exec "总结一下这个仓库的结构"
+muagent exec "Summarize the structure of this repository."
 ```
 
-## 基本用法
+## Basic Usage
 
-默认启动全屏 TUI:
+Start the full-screen TUI:
 
 ```bash
 muagent
 ```
 
-行模式 REPL:
+Start the line-mode REPL:
 
 ```bash
 muagent repl
 ```
 
-单次执行:
+Run one-shot tasks:
 
 ```bash
-muagent exec "阅读 src/lib.rs 并解释模块导出"
-muagent exec "帮我找出失败测试的原因"
+muagent exec "Read src/lib.rs and explain the exported modules."
+muagent exec "Find out why the tests are failing."
 ```
 
-继续最近的持久化 session:
+Resume persisted sessions:
 
 ```bash
 muagent resume
 muagent resume --last
-muagent resume "继续刚才的任务"
-muagent exec resume --last "继续刚才的任务"
+muagent resume "Continue the previous task."
+muagent exec resume --last "Continue the previous task."
 muagent sessions
 ```
 
-临时切换 provider / model:
+Temporarily switch provider or model:
 
 ```bash
-muagent --provider openai --model gpt-5.4-nano "列出当前项目的测试入口"
-muagent --provider openai-codex --model gpt-5.5 "继续分析当前改动"
+muagent --provider openai --model gpt-5.4-nano "List the test entry points."
+muagent --provider openai-codex --model gpt-5.5 "Analyze the current changes."
 ```
 
-CLI、REPL、TUI、工具、skills 和 agent instruction 文件的完整使用说明见
-[USAGE.md](USAGE.md)。配置字段、默认值、环境变量和 OAuth 细节见 [CONFIG.md](CONFIG.md)。
+See [USAGE.md](USAGE.md) for complete CLI, REPL, TUI, tool, skill, and agent
+instruction usage. See [CONFIG.md](CONFIG.md) for config fields, defaults,
+environment variables, and OpenAI Codex OAuth details.
 
-## 目录结构
+## Repository Layout
 
 ```text
 muagent/
 ├── Cargo.toml
 ├── package.json
-├── src/                 # core runtime, CLI, providers, tools, sessions, storage
+├── src/                 # runtime, CLI, providers, tools, sessions, storage
 ├── tests/               # integration tests
-├── evals/               # local 22-case benchmark binary
-├── design/              # architecture design docs
+├── evals/               # local benchmark binary
 ├── CONFIG.md            # configuration reference
 ├── USAGE.md             # CLI and runtime usage
-├── DEVELOPMENT.md       # local development and benchmark notes
+├── DEVELOPMENT.md       # local development notes
 ├── BUILD.md             # cross-platform build and deployment
-└── RUN.md               # detailed run/test notes and historical acceptance checklist
+└── RUN.md               # run/test commands and selected test map
 ```
 
-## 文档索引
+## Documentation
 
-- [USAGE.md](USAGE.md): 安装方式、CLI、REPL/TUI、工具安全边界、skills
-- [CONFIG.md](CONFIG.md): 配置文件字段、默认值、provider、环境变量、OpenAI Codex OAuth
-- [DEVELOPMENT.md](DEVELOPMENT.md): 本地开发命令、测试、benchmark、源码目录说明
-- [BUILD.md](BUILD.md): 交叉编译、Raspberry Pi / Linux 产物和部署
-- [RUN.md](RUN.md): 更细的运行、测试、验收记录
-- [design/00-README.md](design/00-README.md): 设计文档索引
-- [design/02-architecture.md](design/02-architecture.md): 核心架构
-- [design/14-sessions-memory.md](design/14-sessions-memory.md): session 与历史压缩
-- [design/16-prompt-design.md](design/16-prompt-design.md): prompt 与 cache 设计
-- [design/17-thinking-design.md](design/17-thinking-design.md): thinking / reasoning artifact 设计
+- [USAGE.md](USAGE.md): installation, CLI modes, TUI/REPL commands, tools,
+  skills, and agent instruction files
+- [CONFIG.md](CONFIG.md): config files, defaults, providers, environment
+  variables, model capabilities, and OAuth
+- [DEVELOPMENT.md](DEVELOPMENT.md): local development commands, tests,
+  benchmarks, and source layout
+- [BUILD.md](BUILD.md): cross-compilation, Raspberry Pi/Linux targets, and
+  deployment checks
+- [RUN.md](RUN.md): quick runbook, troubleshooting, benchmark commands, and a
+  selected integration-test map

@@ -1,16 +1,18 @@
-# μAgent 使用说明
+# μAgent Usage
 
-这份文档放面向使用者的 CLI、REPL、TUI、工具和 skills 说明。配置字段和环境变量的完整参考
-见 [CONFIG.md](CONFIG.md), 本地开发命令见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+This document covers user-facing installation, CLI modes, TUI/REPL commands,
+tools, skills, and agent instruction files. See [CONFIG.md](CONFIG.md) for the
+complete configuration reference and [DEVELOPMENT.md](DEVELOPMENT.md) for local
+development commands.
 
-## 安装 CLI
+## Install The CLI
 
-前置要求:
+Requirements:
 
 - Node.js 16+
 - Rust/Cargo 1.75+
 
-如果机器还没有 Rust/Cargo, 先安装 Rust toolchain:
+Install Rust first if needed:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -19,61 +21,63 @@ cargo --version
 rustc --version
 ```
 
-从当前仓库安装到本机:
+Install from the current checkout:
 
 ```bash
 npm install -g .
 muagent --help
 ```
 
-这条命令是本地 npm 安装, 不需要公开上传 npm 包。它会从当前仓库安装 `package.json`
-里的 `muagent` bin, 并在安装时调用 Cargo 构建 Rust CLI。npm 会把命令 shim 放到 npm
-的全局 bin 目录, 例如 Homebrew Node 常见是 `/opt/homebrew/bin/muagent`。
+This is a local npm install. It does not require publishing the package. The
+install script builds the Rust CLI and places the `muagent` shim in npm's global
+binary directory, for example `/opt/homebrew/bin/muagent` with a common
+Homebrew Node setup.
 
-如果想更接近正式软件包安装, 但仍然不公开上传, 可以先打成本地 tarball 再安装:
+To test a package artifact without publishing:
 
 ```bash
 npm pack
 npm install -g ./muagent-0.1.0.tgz
 ```
 
-不想全局安装, 也可以用本地包一次性执行:
+To run without a global install:
 
 ```bash
 npx --package . muagent --help
 ```
 
-卸载本地全局安装:
+Uninstall the local global package:
 
 ```bash
 npm uninstall -g muagent
 ```
 
-查看 npm 全局安装前缀:
+Check npm's global prefix:
 
 ```bash
 npm config get prefix
 ```
 
-绕过 npm, 直接用 Cargo 源码安装:
+Install directly with Cargo:
 
 ```bash
 cargo install --path . --bin muagent --force
 ```
 
-Cargo 默认把可执行文件放到当前用户的 Cargo bin 目录:
+Cargo installs to the current user's Cargo binary directory:
 
 ```text
 ~/.cargo/bin/muagent
 ```
 
-只要对应 bin 目录在 `PATH` 里, 安装后就是正常的全局命令。Cargo 路径可这样加入:
+Make sure that directory is in `PATH`:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-如果需要系统级安装到 `/usr/local/bin`, 可以先构建 release binary, 再复制:
+For a system-level install, build a release binary and copy it into a system
+binary directory:
 
 ```bash
 cargo build --release --bin muagent
@@ -81,28 +85,29 @@ sudo install -m 755 target/release/muagent /usr/local/bin/muagent
 muagent --help
 ```
 
-当前 npm 包只用于本地安装, 还没有发布到 npm registry, 所以写法是
-`npm install -g .`, 不是 `npm install -g muagent`。如果以后要支持 `npx muagent` 或
-`npm install -g muagent`, 需要把包和平台 binary 发布出去。
+The npm package is currently intended for local installs, so use
+`npm install -g .` rather than `npm install -g muagent`.
 
-## 配置入口
+## Configure A Provider
 
-`muagent` 启动时以配置文件为主, 再叠加 `.env` / 环境变量 / 命令行参数。安装命令不会
-自动创建配置文件; 你可以先建一个用户级配置:
+`muagent` loads config files first, then applies `.env`, environment variables,
+and CLI flags. Installation does not create a config file automatically:
 
 ```bash
 mkdir -p ~/.muagent
 $EDITOR ~/.muagent/config.toml
 ```
 
-推荐把密钥放在环境变量或 `.env`, 配置文件只引用环境变量名:
+Keep secrets in environment variables or `.env`, and reference the variable name
+from config:
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 export OPENAI_API_KEY=sk-...
 ```
 
-OpenRouter + OpenAI + OpenAI Codex 示例, 默认用 OpenRouter:
+Example with OpenRouter as the default provider, plus OpenAI and OpenAI Codex
+profiles for explicit switching:
 
 ```toml
 [model]
@@ -118,139 +123,264 @@ api_key_env = "OPENAI_API_KEY"
 
 [providers.openai_codex]
 model = "gpt-5.5"
-# 推荐先运行 `codex login`, 让 muagent 复用 ~/.codex/auth.json。
-# 如果手动传 access token, 再打开下面这行:
+# Prefer `codex login`; muagent can reuse ~/.codex/auth.json.
+# For a manual access token, uncomment the next line:
 # api_key_env = "OPENAI_CODEX_ACCESS_TOKEN"
 ```
 
-完整配置字段、默认值、环境变量和 OpenAI Codex OAuth 细节见 [CONFIG.md](CONFIG.md)。
+See [CONFIG.md](CONFIG.md) for all fields, defaults, environment variables, and
+OpenAI Codex OAuth behavior.
 
-## CLI 用法
+## Command Forms
 
-默认启动全屏 TUI:
+| Form | Behavior |
+|---|---|
+| `muagent` | Start the full-screen TUI |
+| `muagent <PROMPT>` | Start the TUI and submit an initial prompt |
+| `muagent exec <PROMPT>` | Run one task and exit |
+| `muagent repl` or `muagent --repl` | Start the line-mode REPL |
+| `muagent resume` | Pick a persisted session from the current workspace |
+| `muagent resume --last [PROMPT]` | Resume the latest session in the current workspace |
+| `muagent resume <SESSION_ID> [PROMPT]` | Resume a specific session |
+| `muagent exec resume --last <PROMPT>` | Resume the latest session, run one turn, and exit |
+| `muagent sessions` | List persisted sessions for the current workspace |
+| `muagent sessions --all` | List persisted sessions across all workspaces |
+
+Config flags can be placed before the command. Most config flags are also
+accepted inside `exec`, `resume`, and `sessions`, but putting them before the
+command is easier to read:
+
+```bash
+muagent --provider openai --model gpt-5.4-nano exec "Run the focused tests."
+muagent --store memory --disable-tools sh_exec "Inspect this repository only."
+```
+
+## CLI Modes
+
+Start the full-screen TUI:
 
 ```bash
 muagent
 ```
 
-启动行模式 REPL:
+Start the line-mode REPL:
 
 ```bash
 muagent repl
-# 或
+# or
 muagent --repl
 ```
 
-TUI 是默认交互模式。它复用同一套 slash commands, 例如 `/help`, `/model`,
-`/provider`, `/tokens`, `/history`, `/list`, `/continue`。`Esc` 或 `Ctrl-C`
-退出, `PageUp` / `PageDown` 滚动消息区。输入为空或单行时, `Up` / `Down`
-浏览本次 TUI 的输入历史; 多行输入里仍作为光标移动。TUI 支持 bracketed paste:
-短文本会进入输入框, 多行或很长的粘贴会在界面里显示为 `[pasted N lines]` 摘要,
-提交时仍发送完整原文。底部状态栏会显示后台 `sh_exec` job 数量; `Ctrl-B` 或
-`F2` 打开 job 列表, `Up` / `Down` 选择, `Enter` 查看详情, `Esc` 返回。
-
-单次执行任务:
+Run one task and exit:
 
 ```bash
-muagent exec "阅读 src/lib.rs 并解释模块导出"
-muagent exec "帮我找出失败测试的原因"
+muagent exec "Read src/lib.rs and explain the exported modules."
+muagent exec "Find the cause of the failing tests."
 ```
 
-带 prompt 启动 TUI:
+Start the TUI with an initial prompt:
 
 ```bash
-muagent "阅读 src/lib.rs 并解释模块导出"
+muagent "Read src/lib.rs and explain the exported modules."
 ```
 
-携带本地图片输入:
+Attach local images to a one-shot prompt:
 
 ```bash
 muagent exec \
   --image ./screenshots/error.png \
-  "说明这张截图里的报错"
+  "Explain the error shown in this screenshot."
 ```
 
-支持的图片扩展名: `png`, `jpg`, `jpeg`, `webp`, `gif`。
-
-继续最近的持久化 session:
+Supported image extensions are `png`, `jpg`, `jpeg`, `webp`, and `gif`.
+Multiple images can be provided with a comma-separated list or repeated flags:
 
 ```bash
-muagent resume              # 列出当前 workspace 的 sessions 并选择
-muagent resume --last
-muagent resume "继续刚才的任务"
-muagent exec resume --last "继续刚才的任务"
+muagent exec \
+  --image ./a.png,./b.jpg \
+  --image ./c.webp \
+  "Compare these screenshots."
 ```
 
-列出 session:
+Images require a one-shot prompt. They are accepted by `exec` and by resume
+commands that include a prompt. They are not accepted by `sessions` or by the
+TUI.
+
+Resume persisted sessions:
+
+```bash
+muagent resume              # choose from sessions in the current workspace
+muagent resume --last
+muagent resume --all        # choose from every workspace
+muagent resume "Continue the previous task."
+muagent exec resume --last "Continue the previous task."
+```
+
+List sessions:
 
 ```bash
 muagent sessions
 muagent sessions --all
 ```
 
-继续指定 session:
+Resume a specific session:
 
 ```bash
 muagent resume <SESSION_ID>
-muagent exec resume <SESSION_ID> "下一步做什么"
+muagent exec resume <SESSION_ID> "What should we do next?"
 ```
 
-如果 prompt 本身以 `-` 开头, 用 `--` 分隔参数:
+If a prompt starts with `-`, separate flags from the prompt with `--`:
 
 ```bash
-muagent -- "- 这是一个以短横线开头的 prompt"
+muagent -- "- This prompt starts with a dash."
 ```
 
-## TUI / REPL 命令
+## Options Reference
 
-进入 TUI 或 REPL 后可使用:
-
-| 命令 | 说明 |
+| Option | Description |
 |---|---|
-| `/help` | 显示命令 |
-| `/new` | 开始新 session |
-| `/tokens` | 查看当前 session token / cost 统计 |
-| `/history` | 打印最近 20 条消息摘要 |
-| `/model` | 显示当前 provider / model |
-| `/model <model_id>` | 切换当前 session 的 model, 不写回配置文件 |
-| `/provider` | 显示当前 provider / model |
-| `/provider <name> [model_id]` | 切换当前 session 的 provider / model, 不写回配置文件 |
-| `/skills` | 列出已注册 skills |
-| `/session` | 显示当前 session_id / run_id / step |
-| `/list` | 列出持久化 sessions |
-| `/continue <session_id>` | 继续某个 session |
-| `/fork <run_id> <message_index>` | 从历史消息分叉新 session |
-| `/search <query>` | 搜索持久化 session 历史 |
-| `/quit`, `/exit` | 退出 |
+| `-h`, `--help` | Print help |
+| `-V`, `--version` | Print version |
+| `--tui` | Use the full-screen TUI |
+| `--repl` | Use the line REPL when no one-shot prompt is supplied |
+| `--config-file <FILE>` | Load a specific TOML config file |
+| `--provider <NAME>` | Select `openai`, `openai-codex`, `anthropic`, `google`, or `openrouter` |
+| `-m`, `--model <ID>` | Override the model ID |
+| `--base-url <URL>` | Override the provider base URL |
+| `-i`, `--image <PATHS>` | Attach image files to a one-shot prompt |
+| `--store <SPEC>` | Use `memory`, `jsonl:/path/to/store`, or a plain JSONL store path |
+| `--root <DIR>` | Set the filesystem sandbox root for file tools |
+| `--mcp-sse <URLS>` | Register comma-separated MCP SSE endpoints; repeated flags append |
+| `--cache <MODE>` | `auto` or `off` |
+| `--thinking <MODE>` | `high`, `auto`, `off`, `minimal`, `low`, `medium`, `max`, or `xhigh` |
+| `--max-tokens <N>` | Set the context budget used by automatic compaction |
+| `--log <FILTER>` | Set a tracing filter such as `muagent=debug,info` |
+| `--tools <LIST>`, `--enable-tools <LIST>` | Expose only the listed tools |
+| `--disable-tools <LIST>` | Hide and reject the listed tools |
+| `--skills <LIST>`, `--enable-skills <LIST>` | Expose only the listed skill IDs |
+| `--disable-skills <LIST>` | Hide the listed skill IDs |
+| `--no-skills-autoload` | Disable automatic skill discovery |
 
-## 工具与安全边界
+List arguments use commas:
 
-内置工具:
+```bash
+muagent --disable-tools sh_exec,net_http "Analyze without shell or network."
+muagent --tools fs_read,fs_list,fs_stat "Inspect files without write tools."
+```
 
-- `fs_read`, `fs_write`, `fs_edit`, `fs_list`, `fs_stat`, `fs_delete`, `fs_rename`
-- `net_http`, 默认注册; 可用 `MUAGENT_NET_HTTP=off` 或 `--disable-tools net_http` 关闭
-- `sh_exec`, 默认注册, 直接运行 PATH 上的 binary 或指定路径
+Useful environment-only controls:
 
-文件工具被限制在 `fs.root` / `--root` 下。`sh_exec` 可运行 PATH 上的 binary
-或指定路径; 需要禁用整个 shell 工具时, 用 `--disable-tools sh_exec`。
+| Variable | Description |
+|---|---|
+| `MUAGENT_LOG` | Tracing filter; falls back to `RUST_LOG` |
+| `MUAGENT_MAX_STEPS` | Safety limit for the model/tool loop |
+| `MUAGENT_BAD_TOOL_EVENT_LIMIT` | Stops repeated timeout/security/error tool loops |
+| `MUAGENT_AGENT_MD` | Set to `off` to disable agent instruction files |
+| `MUAGENT_AGENT_MD_MAX_BYTES` | Per-file byte cap for agent instruction files |
 
-## Skills 与 Agent 指令
+## Common Recipes
 
-启动时默认从以下位置自动加载 skills:
+Run without writing persistent session history:
+
+```bash
+muagent --store memory exec "Try this once and discard the session."
+```
+
+Constrain file access to the current repository and disable shell/network tools:
+
+```bash
+muagent \
+  --root . \
+  --disable-tools sh_exec,net_http \
+  exec "Review the public documentation."
+```
+
+Debug a provider or config issue:
+
+```bash
+MUAGENT_LOG=muagent=debug,info \
+muagent --provider openrouter --model openai/gpt-5.4-nano exec "Say hello."
+```
+
+Use a temporary project config:
+
+```bash
+muagent --config-file .muagent/config.toml exec "Use this project's defaults."
+```
+
+## TUI Notes
+
+The TUI is the default interactive mode. It uses the same slash commands as the
+REPL, including `/help`, `/model`, `/provider`, `/tokens`, `/history`, `/list`,
+and `/continue`.
+
+Common controls:
+
+- `Esc` or `Ctrl-C`: exit
+- `PageUp` / `PageDown`: scroll the message area
+- `Up` / `Down`: browse input history when the input is empty or single-line
+- bracketed paste: short text goes into the input; long or multi-line paste is
+  summarized in the UI as `[pasted N lines]` and submitted in full
+- `Ctrl-B` or `F2`: open the background `sh_exec` job list
+
+## TUI / REPL Commands
+
+| Command | Description |
+|---|---|
+| `/help` | Show commands |
+| `/new` | Start a new session |
+| `/tokens` | Show token and cost counters for the current session |
+| `/history` | Print a brief summary of the last 20 messages |
+| `/model` | Show the current provider and model |
+| `/model <model_id>` | Switch the current session's model without editing config |
+| `/provider` | Show the current provider and model |
+| `/provider <name> [model_id]` | Switch the current session's provider and optional model |
+| `/skills` | List registered skills |
+| `/session` | Show the current session, run, and step |
+| `/list` | List persisted sessions |
+| `/continue <session_id>` | Continue a persisted session |
+| `/fork <run_id> <message_index>` | Fork a session from a historical message |
+| `/search <query>` | Search persisted session history |
+| `/quit`, `/exit` | Exit |
+
+## Tools And Boundaries
+
+Built-in tools:
+
+- `fs_read`, `fs_write`, `fs_edit`, `fs_list`, `fs_stat`, `fs_delete`,
+  `fs_rename`
+- `net_http`, registered by default and removable with `MUAGENT_NET_HTTP=off`
+  or `--disable-tools net_http`
+- `sh_exec`, registered by default and able to run binaries on `PATH` or by
+  explicit path
+
+File tools are restricted to `fs.root` / `--root`. Disable shell execution with:
+
+```bash
+muagent --disable-tools sh_exec
+```
+
+## Skills And Agent Instructions
+
+By default, `muagent` discovers skills from:
 
 - `./.muagent/skills/`
 - `~/.muagent/skills/`
 
-每个 skill 目录需要包含 `SKILL.md`, 并在 frontmatter 中提供 `name` 和 `description`。
-可以通过 `--skills`, `--disable-skills`, `--no-skills-autoload` 或对应环境变量控制加载。
+Each skill directory must contain `SKILL.md` with frontmatter fields for `name`
+and `description`. Skill loading can be controlled with `--skills`,
+`--disable-skills`, `--no-skills-autoload`, and the matching environment
+variables.
 
-Agent 指令文件默认开启, 会从工作区祖先目录和用户配置目录读取:
+Agent instruction files are enabled by default. `muagent` reads these filenames
+from workspace ancestor directories and the user config directory:
 
 - `AGENT.md`
 - `AGENTS.md`
 - `CLAUDE.md`
 
-关闭:
+Disable them for one run:
 
 ```bash
 MUAGENT_AGENT_MD=off muagent
