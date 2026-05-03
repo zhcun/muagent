@@ -292,6 +292,12 @@ struct ManagedInner {
 
 impl LinuxProcessExec {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for LinuxProcessExec {
+    fn default() -> Self {
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -531,8 +537,12 @@ impl ProcessExec for LinuxProcessExec {
             .values()
             .cloned()
             .collect::<Vec<_>>();
+        // The closure can't be elided: `jobs.iter()` yields `&Arc<ManagedJob>`
+        // but `snapshot` takes `&ManagedJob`. The closure makes the auto-deref
+        // through `Arc::Deref` explicit at the call site.
+        #[allow(clippy::redundant_closure)]
         let mut snapshots = jobs.iter().map(|job| snapshot(job)).collect::<Vec<_>>();
-        snapshots.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+        snapshots.sort_by_key(|s| std::cmp::Reverse(s.elapsed));
         Ok(snapshots)
     }
 }

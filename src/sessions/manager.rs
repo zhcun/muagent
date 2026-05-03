@@ -33,36 +33,38 @@ impl SessionManager {
     ) -> Result<Vec<SessionInfo>, StoreError> {
         let runs = self.store.list_runs(RunFilter::default()).await?;
 
-        // Aggregate runs per session
-        let mut by_sid: std::collections::HashMap<
-            SessionId,
-            (u32, i64, RunStatus, Option<String>),
-        > = std::collections::HashMap::new();
+        // Aggregate user-visible runs per session. A freshly allocated
+        // RunState is only an in-memory draft; it becomes a session once it
+        // has transcript history. This keeps "open TUI then quit" and other
+        // empty runs out of resume/session pickers.
+        let mut by_sid: std::collections::HashMap<SessionId, SessionAggregate> =
+            std::collections::HashMap::new();
         for r in runs {
-            let entry = by_sid
-                .entry(r.session_id)
-                .or_insert((0, 0, RunStatus::Active, None));
-            entry.0 += 1;
-            if r.updated_ms > entry.1 {
-                entry.1 = r.updated_ms;
-                entry.2 = r.status;
-                entry.3 = r.workspace_root;
+            let Some(state) = self.store.load_run(r.run_id).await? else {
+                continue;
+            };
+            if !is_user_visible_session_run(&state) {
+                continue;
+            }
+            let entry = by_sid.entry(r.session_id).or_default();
+            entry.run_count += 1;
+            if r.updated_ms > entry.updated_ms {
+                entry.updated_ms = r.updated_ms;
+                entry.latest_status = r.status;
+                entry.workspace_root = r.workspace_root;
+                entry.title = last_user_message_brief(&state.history);
             }
         }
         let mut out: Vec<SessionInfo> = by_sid
             .into_iter()
-            .map(
-                |(session_id, (run_count, updated_ms, latest_status, workspace_root))| {
-                    SessionInfo {
-                        session_id,
-                        run_count,
-                        updated_ms,
-                        latest_status,
-                        workspace_root,
-                        title: None,
-                    }
-                },
-            )
+            .map(|(session_id, agg)| SessionInfo {
+                session_id,
+                run_count: agg.run_count,
+                updated_ms: agg.updated_ms,
+                latest_status: agg.latest_status,
+                workspace_root: agg.workspace_root,
+                title: agg.title,
+            })
             .collect();
         out.sort_by_key(|s| -s.updated_ms);
         if let Some(limit) = limit {
@@ -107,12 +109,19 @@ impl SessionManager {
         now_ms: i64,
     ) -> Result<RunState, StoreError> {
         let runs = self.list_runs_in_session(session_id).await?;
-        let last = runs.last().ok_or(StoreError::NotFound)?;
-        let mut prev = self
-            .store
-            .load_run(last.run_id)
-            .await?
-            .ok_or(StoreError::NotFound)?;
+        let mut latest_visible: Option<(RunHeader, RunState)> = None;
+        for run in runs.into_iter().rev() {
+            let Some(state) = self.store.load_run(run.run_id).await? else {
+                continue;
+            };
+            if is_user_visible_session_run(&state) {
+                latest_visible = Some((run, state));
+                break;
+            }
+        }
+        let Some((last, mut prev)) = latest_visible else {
+            return Err(StoreError::NotFound);
+        };
         if !is_continuable(&prev.step) {
             return Err(StoreError::Transient(
                 "latest run is still active; only done/failed/paused runs can be continued".into(),
@@ -312,6 +321,21 @@ fn message_brief(m: &Message) -> String {
     full.chars().take(120).collect()
 }
 
+fn last_user_message_brief(history: &[Message]) -> Option<String> {
+    history.iter().rev().find_map(|message| {
+        let Message::User { content } = message else {
+            return None;
+        };
+        let text = content_text(content);
+        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if compact.is_empty() {
+            None
+        } else {
+            Some(compact.chars().take(120).collect())
+        }
+    })
+}
+
 pub struct SessionInfo {
     pub session_id: SessionId,
     pub run_count: u32,
@@ -319,6 +343,18 @@ pub struct SessionInfo {
     pub latest_status: RunStatus,
     pub workspace_root: Option<String>,
     pub title: Option<String>,
+}
+
+/// Per-session accumulator used inside `list_sessions`. Replaces a
+/// `(u32, i64, RunStatus, Option<String>, Option<RunId>, Option<String>)`
+/// tuple that clippy (rightly) flagged as too anonymous.
+#[derive(Default)]
+struct SessionAggregate {
+    run_count: u32,
+    updated_ms: i64,
+    latest_status: RunStatus,
+    workspace_root: Option<String>,
+    title: Option<String>,
 }
 
 pub struct SearchHit {
@@ -334,4 +370,8 @@ pub fn is_continuable(step: &Step) -> bool {
         step,
         Step::Done { .. } | Step::Failed { .. } | Step::Paused { .. }
     )
+}
+
+fn is_user_visible_session_run(state: &RunState) -> bool {
+    !state.history.is_empty()
 }

@@ -845,6 +845,7 @@ async fn run_cli_turn(
         argv.push("--image".into());
         argv.push(image.path.display().to_string());
     }
+    argv.push("exec".into());
     if turn_idx > 0 {
         argv.push("resume".into());
         argv.push("--last".into());

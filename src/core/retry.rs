@@ -53,6 +53,37 @@ impl RetryPolicy {
         }
     }
 
+    /// Build from `MUAGENT_MODEL_RETRY_*` environment variables, falling back
+    /// to the [`Default`] schedule for any field that is unset or empty.
+    /// Hosts that wire their own runtime call this once during setup.
+    pub fn from_env() -> Result<Self, String> {
+        fn parse_u<T: std::str::FromStr>(name: &str) -> Result<Option<T>, String> {
+            match std::env::var(name) {
+                Ok(raw) if raw.trim().is_empty() => Ok(None),
+                Ok(raw) => raw
+                    .parse::<T>()
+                    .map(Some)
+                    .map_err(|_| format!("{name} must be an unsigned integer")),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(e) => Err(format!("{name}: {e}")),
+            }
+        }
+        let mut policy = Self::default();
+        if let Some(value) = parse_u::<u32>("MUAGENT_MODEL_RETRY_ATTEMPTS")? {
+            policy.max_attempts = value.max(1);
+        }
+        if let Some(value) = parse_u::<u64>("MUAGENT_MODEL_RETRY_INITIAL_MS")? {
+            policy.initial_backoff_ms = value;
+        }
+        if let Some(value) = parse_u::<u64>("MUAGENT_MODEL_RETRY_MAX_MS")? {
+            policy.max_backoff_ms = value;
+        }
+        if policy.max_backoff_ms < policy.initial_backoff_ms {
+            policy.max_backoff_ms = policy.initial_backoff_ms;
+        }
+        Ok(policy)
+    }
+
     /// Wait duration before the `attempt`-th try (1-indexed: no wait before
     /// attempt 1, `initial_backoff_ms` before attempt 2, etc.). Honors the
     /// optional `retry_after_ms` hint from the provider when present.

@@ -3,15 +3,18 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
-use crate::core::cache::CachePolicy;
+use crate::core::cache::{CacheKeyStrategy, CachePolicy};
 use crate::core::cancel::CancelToken;
 use crate::core::clock::Clock;
 use crate::core::clock::SystemClock;
 use crate::core::compactor::Compactor;
 use crate::core::error::{ErrorClass, ModelError, RuntimeError, StoreErrClass, StoreError};
 use crate::core::event::Event;
-use crate::core::model::{LlmCaps, ModelAdapter, ModelReply, ModelRequest};
-use crate::core::prompt::{render_cacheable_blocks, render_runtime_blocks, PromptBlock};
+use crate::core::model::{ModelAdapter, ModelReply, ModelRequest};
+use crate::core::prompt::{
+    adapt_tool_descriptors, append_section, blocks_from_active_set, cache_fingerprint,
+    capability_hint, render_cacheable_blocks, render_runtime_blocks,
+};
 use crate::core::provider::{ActiveToolSet, ActiveToolSetProvider};
 use crate::core::retry::RetryPolicy;
 use crate::core::run_state::RunState;
@@ -21,197 +24,29 @@ use crate::core::store::SessionStore;
 use crate::core::summary_recall::insert_summary_recall_before_latest_user;
 use crate::core::thinking::ThinkingConfig;
 use crate::core::tool::{
-    Idempotency, PendingCall, SideEffects, ToolContext, ToolDescriptor, ToolExecutor, ToolResult,
+    Idempotency, PendingCall, SideEffects, ToolContext, ToolExecutor, ToolResult,
     TOOL_PROTOCOL_ERROR_TOOL,
 };
 use crate::core::types::{Content, Message};
 use futures::FutureExt;
-use sha2::{Digest, Sha256};
 
-/// How `Runner` populates `ModelRequest::prompt_cache_key`.
+/// Pre-commit snapshot of every `RunState` field that `Runner::commit` may
+/// mutate. Used to make state mutation + persist atomic: if the store
+/// rejects the write, the in-memory state is rolled back to exactly what
+/// the caller had before. Without this, a transient store error would leave
+/// `state.event_seq` advanced past disk and every subsequent CAS check
+/// would fail with `StaleState`, bricking the run until the host reloaded
+/// from disk.
 ///
-/// The provider uses this string as a routing-affinity hint: requests
-/// sharing the same key (and the same prefix bytes) are sent to the same
-/// engine replica, where the cached KV is already warm. **Picking the right
-/// granularity is the difference between a cold first turn and an instant
-/// hit on every new session of the same agent.**
-///
-/// Empirical numbers on `openai/gpt-5.4-nano` via OpenRouter (5-turn loop,
-/// ~7.5k token prompt at turn 5):
-/// - `Session` (per-conversation): turn-1 cache_read = 0; turn-5 ratio = 78%.
-/// - `PrefixHash` (per-agent-config): turn-1 cache_read = 2816; turn-5
-///   ratio = 92%. Same prefix bytes, only the routing key differs.
-///
-/// The trade-off is OpenAI's published per-(prefix, key) throughput
-/// ceiling of ~15 RPM. For multi-tenant servers serving many concurrent
-/// users, `Session` keeps each user's traffic on their own replica;
-/// `PrefixHash` would funnel them all to one and hit the limit.
-#[derive(Clone, Debug)]
-pub enum CacheKeyStrategy {
-    /// Hash of the final stable prompt prefix plus canonical tool schemas.
-    /// **Default.** Best for CLIs and single-user agents where every session
-    /// shares the same identity and cross-session cache reuse is the goal.
-    PrefixHash,
-    /// Use the per-conversation `state.session_id`. Best for high-RPS
-    /// multi-tenant servers where each session must route independently
-    /// to stay under the per-key throughput ceiling.
-    Session,
-    /// A caller-supplied stable key. Use for fleet-level keys (e.g. one
-    /// key per deployed agent name) when neither default fits.
-    Fixed(String),
-    /// Don't send a `prompt_cache_key` at all. Fall back to the provider's
-    /// automatic prefix routing.
-    None,
-}
-
-impl Default for CacheKeyStrategy {
-    fn default() -> Self {
-        CacheKeyStrategy::PrefixHash
-    }
-}
-
-fn hash_cache_fingerprint(cacheable_prefix: &str, tools: &[ToolDescriptor]) -> String {
-    let mut h = Sha256::new();
-    h.update(b"muagent-prompt-v2\0");
-    h.update(cacheable_prefix.as_bytes());
-
-    let mut ordered_tools: Vec<&ToolDescriptor> = tools.iter().collect();
-    ordered_tools.sort_by(|a, b| a.name.cmp(&b.name));
-    for tool in ordered_tools {
-        h.update(b"\0tool\0");
-        match serde_json::to_string(tool) {
-            Ok(s) => h.update(s.as_bytes()),
-            Err(_) => {
-                h.update(tool.name.as_bytes());
-                h.update(b"\0");
-                h.update(tool.description.as_bytes());
-            }
-        }
-    }
-
-    hash_prefix_hex(h)
-}
-
-fn hash_prefix_hex(h: Sha256) -> String {
-    let bytes = h.finalize();
-    let mut out = String::with_capacity(16);
-    for b in &bytes[..8] {
-        out.push_str(&format!("{b:02x}"));
-    }
-    format!("muagent-{out}")
-}
-
-fn active_prompt_blocks(ats: &ActiveToolSet) -> Vec<PromptBlock> {
-    if !ats.prompt_blocks.is_empty() {
-        return ats.prompt_blocks.clone();
-    }
-    if ats.prompt_augmentation.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![PromptBlock::session_sticky(
-            "active_tool_set.prompt_augmentation",
-            ats.prompt_augmentation.clone(),
-        )]
-    }
-}
-
-fn model_capability_prompt(caps: &LlmCaps, tools: &[ToolDescriptor]) -> String {
-    let has_fs_read = has_tool(tools, "fs_read");
-    let has_fs_stat = has_tool(tools, "fs_stat");
-    let has_sh_exec = has_tool(tools, "sh_exec");
-
-    let mut out = String::from("## Model capability guidance\n");
-    if caps.vision {
-        out.push_str(
-            "- This model supports image inputs. If visual content matters, inspect the image instead of guessing from filenames, MIME types, or surrounding text.\n",
-        );
-        if has_fs_read {
-            out.push_str(
-                "- `fs_read` can return supported PNG/JPEG/GIF/WebP files as image attachments visible to this model. Use it when screenshots, photos, diagrams, UI states, charts, or OCR-relevant images are material; leave `force_text=false` for visual inspection.\n",
-            );
-        } else {
-            out.push_str(
-                "- No local image-reading tool is active. You can still reason about images already attached by the user or returned by other tools.\n",
-            );
-        }
-    } else {
-        out.push_str(
-            "- This model does not support image inputs. Image attachments from tools are omitted before the next model turn.\n",
-        );
-        if has_fs_read {
-            out.push_str(
-                "- Do not use `fs_read` on image files for visual inspection or OCR. It is still valid for text files. For image knowledge, use available text-producing alternatives: ",
-            );
-            let mut alternatives = Vec::new();
-            if has_fs_stat {
-                alternatives.push("`fs_stat` for file metadata");
-            }
-            if has_sh_exec {
-                alternatives.push("`sh_exec` with available OCR or image-processing commands");
-            }
-            alternatives.push("a user-provided description");
-            out.push_str(&alternatives.join(", "));
-            out.push_str(".\n");
-        } else {
-            out.push_str(
-                "- Use only available text-producing tools or ask the user for a description when the task depends on image content.\n",
-            );
-        }
-    }
-    out
-}
-
-fn adapt_tool_descriptors_for_caps(
-    tools: &[ToolDescriptor],
-    caps: &LlmCaps,
-) -> Vec<ToolDescriptor> {
-    tools
-        .iter()
-        .map(|tool| {
-            let mut tool = tool.clone();
-            if tool.name == "fs_read" && !tool.description.contains("Model capability note:") {
-                let note = if caps.vision {
-                    "Model capability note: this model supports vision, so supported image attachments returned by `fs_read` are visible on the next model turn. Leave `force_text=false` for visual inspection."
-                } else {
-                    "Model capability note: this model does not support vision. Do not call `fs_read` on image files for visual inspection or OCR; image attachments are omitted before the next model turn. Use text-producing alternatives instead."
-                };
-                tool.description = format!("{}\n\n{note}", tool.description.trim_end());
-            }
-            tool
-        })
-        .collect()
-}
-
-fn has_tool(tools: &[ToolDescriptor], name: &str) -> bool {
-    tools.iter().any(|tool| tool.name == name)
-}
-
-fn append_section(out: &mut String, section: &str) {
-    let section = section.trim();
-    if section.is_empty() {
-        return;
-    }
-    if !out.trim().is_empty() {
-        out.push_str("\n\n");
-    }
-    out.push_str(section);
-}
-
-/// Snapshot of the mutating fields of `RunState`. Cheap for ordinary appends:
-/// it clones metadata ledgers but not `history`; a `truncate` rolls back the
-/// last pushed messages.
-///
-/// Used by `Runner::commit` to make state mutation + persist atomic: if
-/// the store rejects the write, the in-memory state is rolled back to
-/// exactly what the caller had before. Without this, a transient store
-/// error would leave `state.event_seq` advanced past disk and every
-/// subsequent CAS check would fail with `StaleState`, bricking the run
-/// until the host reloaded from disk.
+/// Cost: one `Vec<Message>` clone (plus a few small Vec/struct clones) per
+/// commit. Compaction replaces the middle of `history`, so we deep-clone
+/// rather than remembering only a length — a `truncate` rollback would be a
+/// no-op once the vec has shrunk. Typical conversations: microseconds.
 struct StateSnapshot {
     step: Step,
     event_seq: u64,
     updated_ms: i64,
-    history_len: usize,
+    history: Vec<Message>,
     history_ids: Vec<String>,
     next_message_seq: u64,
     next_checkpoint_seq: u64,
@@ -225,7 +60,7 @@ impl StateSnapshot {
             step: state.step.clone(),
             event_seq: state.event_seq,
             updated_ms: state.updated_ms,
-            history_len: state.history.len(),
+            history: state.history.clone(),
             history_ids: state.history_ids.clone(),
             next_message_seq: state.next_message_seq,
             next_checkpoint_seq: state.next_checkpoint_seq,
@@ -238,7 +73,7 @@ impl StateSnapshot {
         state.step = self.step;
         state.event_seq = self.event_seq;
         state.updated_ms = self.updated_ms;
-        state.history.truncate(self.history_len);
+        state.history = self.history;
         state.history_ids = self.history_ids;
         state.next_message_seq = self.next_message_seq;
         state.next_checkpoint_seq = self.next_checkpoint_seq;
@@ -281,16 +116,28 @@ impl Runner {
         RunnerBuilder::default()
     }
 
+    /// Acquire the cancel-token mutex, recovering from poisoning instead
+    /// of unwrapping. The lock scope is always tiny (`clone`, `trigger`,
+    /// or a swap), but if a panic ever crossed it, the previous behaviour
+    /// would cascade-panic every subsequent `step()`. Recovering keeps
+    /// the runner usable — the inner `CancelToken` is plain data with no
+    /// invariants the prior panic could have broken.
+    fn cancel_lock(&self) -> std::sync::MutexGuard<'_, CancelToken> {
+        self.cancel_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Trigger the *current* round's cancel token. Cooperative — tools must
     /// honor it (they receive it via `Tool::run`'s `cancel` parameter).
     pub fn cancel(&self) {
-        self.cancel_token.lock().unwrap().trigger()
+        self.cancel_lock().trigger()
     }
 
     /// Snapshot of the current round's cancel token (useful for hosts that
     /// want to wire their own Ctrl-C handler).
     pub fn cancel_token(&self) -> CancelToken {
-        self.cancel_token.lock().unwrap().clone()
+        self.cancel_lock().clone()
     }
 
     /// 提交一条新用户消息。
@@ -309,7 +156,7 @@ impl Runner {
         }
         // Reset cancel token for the new conversational round (prior
         // round's Ctrl-C should not stick).
-        *self.cancel_token.lock().unwrap() = CancelToken::new();
+        *self.cancel_lock() = CancelToken::new();
         let now = self.clock.now_ms();
         self.commit(state, |s| {
             s.push_message(msg);
@@ -325,7 +172,7 @@ impl Runner {
     /// Run one FSM step.
     pub async fn step(&self, state: &mut RunState) -> Result<StepOutput, RuntimeError> {
         // Cancel gate
-        if self.cancel_token.lock().unwrap().triggered() && !state.step.is_terminal_or_paused() {
+        if self.cancel_lock().triggered() && !state.step.is_terminal_or_paused() {
             let events = self.pause_host_requested(state).await?;
             return Ok(StepOutput {
                 events,
@@ -373,9 +220,32 @@ impl Runner {
             // Snapshot the cancel token for this attempt — never hold the
             // Mutex across an await (clippy::await_holding_lock; would
             // deadlock if a peer tried to swap the token mid-call).
-            let cancel = self.cancel_token.lock().unwrap().child();
+            let cancel = self.cancel_lock().child();
             let attempt_start_ms = self.clock.now_ms();
-            match self.model.turn(req.clone(), cancel).await {
+            // ModelAdapter is host-pluggable; mirror the catch_unwind
+            // policy already applied to ActiveToolSetProvider and tool
+            // execution so a panicking custom adapter surfaces as a
+            // ModelError (transient, retryable) instead of unwinding
+            // through the runner.
+            let turn_result = AssertUnwindSafe(self.model.turn(req.clone(), cancel))
+                .catch_unwind()
+                .await;
+            let turn_result = match turn_result {
+                Ok(r) => r,
+                Err(panic) => {
+                    let brief = panic_brief(panic);
+                    tracing::error!(
+                        target: "muagent::model",
+                        attempt,
+                        panic = %brief,
+                        "model adapter panicked",
+                    );
+                    Err(ModelError::Transient(format!(
+                        "model adapter panicked: {brief}"
+                    )))
+                }
+            };
+            match turn_result {
                 Ok(reply) => {
                     let duration_ms = (self.clock.now_ms() - attempt_start_ms).max(0);
                     let empty = model_reply_is_empty(&reply);
@@ -452,7 +322,53 @@ impl Runner {
     }
 
     async fn on_model_turn(&self, state: &mut RunState) -> Result<StepOutput, RuntimeError> {
-        let ats = match AssertUnwindSafe(self.tools_provider.provide(state))
+        let ats = self.fetch_active_tool_set(state).await;
+
+        // Cacheable system prefix: persona + capability hint + L1 blocks.
+        // Runtime blocks (L2 day-level facts) are added later, after
+        // optional compaction may have rewritten history.
+        let model_caps = self.model.caps();
+        let tools = adapt_tool_descriptors(&ats.tools, &model_caps);
+        let prompt_blocks = blocks_from_active_set(&ats);
+        let mut system = self.base_system_prompt.clone();
+        append_section(&mut system, &capability_hint(&model_caps, &tools));
+        append_section(&mut system, &render_cacheable_blocks(&prompt_blocks));
+
+        let mut pre_events = match self.try_compact(state, &system).await {
+            Ok(events) => events,
+            Err(RuntimeError::Cancelled) => return self.pause_with(state, Vec::new()).await,
+            Err(e) => return Err(e),
+        };
+
+        let req = self.assemble_request(state, system, tools, &prompt_blocks);
+
+        let reply = match self.model_turn_with_retry(req).await {
+            Ok(reply) => reply,
+            Err(RuntimeError::Cancelled) => return self.pause_with(state, pre_events).await,
+            Err(RuntimeError::Store(e)) => return Err(RuntimeError::Store(e)),
+            Err(e) => {
+                let fail = self.fail_run(state, e).await?;
+                pre_events.extend(fail);
+                return Ok(StepOutput {
+                    events: pre_events,
+                    advanced: true,
+                });
+            }
+        };
+
+        let post_events = self.commit_model_reply(state, reply).await?;
+        pre_events.extend(post_events);
+        Ok(StepOutput {
+            events: pre_events,
+            advanced: true,
+        })
+    }
+
+    /// Fetch the active tool set from the host provider, swallowing panics.
+    /// A bad provider should not abort the whole run — fall back to no
+    /// dynamic tools and let the model reason with whatever's been built in.
+    async fn fetch_active_tool_set(&self, state: &RunState) -> ActiveToolSet {
+        match AssertUnwindSafe(self.tools_provider.provide(state))
             .catch_unwind()
             .await
         {
@@ -465,102 +381,97 @@ impl Runner {
                 );
                 ActiveToolSet::default()
             }
+        }
+    }
+
+    /// Optional auto-compaction. Run against a cloned candidate state so a
+    /// third-party compactor's mutations only leak when Runner commits the
+    /// final history and emits a `HistoryCompacted` event. Compactor errors
+    /// other than `Cancelled` and `Store` are logged and swallowed — the
+    /// turn proceeds with the original history.
+    async fn try_compact(
+        &self,
+        state: &mut RunState,
+        system: &str,
+    ) -> Result<Vec<Event>, RuntimeError> {
+        let Some(c) = &self.compactor else {
+            return Ok(Vec::new());
         };
-
-        // Build prompt blocks. Cacheable blocks stay in the stable prefix;
-        // runtime blocks are appended later after day-level facts.
-        let model_caps = self.model.caps();
-        let tools = adapt_tool_descriptors_for_caps(&ats.tools, &model_caps);
-        let prompt_blocks = active_prompt_blocks(&ats);
-        let mut system = self.base_system_prompt.clone();
-        append_section(&mut system, &model_capability_prompt(&model_caps, &tools));
-        append_section(&mut system, &render_cacheable_blocks(&prompt_blocks));
-
-        // Optional auto-compaction. Run it against a cloned candidate state:
-        // third-party compactors are allowed to mutate their input, but those
-        // mutations must not leak unless Runner commits the final history and
-        // emits a HistoryCompacted event.
-        let mut pre_events: Vec<Event> = Vec::new();
-        if let Some(c) = &self.compactor {
-            let mut candidate = state.clone();
-            let cancel = self.cancel_token.lock().unwrap().child();
-            match c.maybe_compact(&mut candidate, &system, cancel).await {
-                Ok(Some(ev)) => {
-                    let snap_history = state.history.clone();
-                    let compacted_history = candidate.history;
-                    let compacted_history_ids = candidate.history_ids;
-                    let compacted_next_message_seq = candidate.next_message_seq;
-                    let compacted_next_checkpoint_seq = candidate.next_checkpoint_seq;
-                    let compacted_checkpoints = candidate.compaction_checkpoints;
-                    let event = Event::HistoryCompacted {
-                        replaced_turns: ev.replaced_turns,
-                        replaced_messages: ev.replaced_messages,
-                        saved_tokens_estimate: ev.saved_tokens_estimate,
-                        checkpoint_id: ev.checkpoint_id,
-                        summary_message_id: ev.summary_message_id,
-                        first_kept_message_id: ev.first_kept_message_id,
-                        seq: 0, // assigned inside commit
-                    };
-                    let committed = self
-                        .commit(state, move |s| {
-                            s.history = compacted_history;
-                            s.history_ids = compacted_history_ids;
-                            s.next_message_seq = compacted_next_message_seq;
-                            s.next_checkpoint_seq = compacted_next_checkpoint_seq;
-                            s.compaction_checkpoints = compacted_checkpoints;
-                            let seq = s.next_seq();
-                            let mut e = event;
-                            if let Event::HistoryCompacted {
-                                seq: ref mut esq, ..
-                            } = e
-                            {
-                                *esq = seq;
-                            }
-                            vec![e]
-                        })
-                        .await;
-                    match committed {
-                        Ok(es) => pre_events.extend(es),
-                        Err(e) => {
-                            // StateSnapshot only truncates history on rollback;
-                            // compaction replaces the middle, so restore the
-                            // full pre-compaction history on persist failure.
-                            state.history = snap_history;
-                            return Err(e);
-                        }
+        let mut candidate = state.clone();
+        let cancel = self.cancel_lock().child();
+        match c.maybe_compact(&mut candidate, system, cancel).await {
+            Ok(Some(ev)) => {
+                let compacted_history = candidate.history;
+                let compacted_history_ids = candidate.history_ids;
+                let compacted_next_message_seq = candidate.next_message_seq;
+                let compacted_next_checkpoint_seq = candidate.next_checkpoint_seq;
+                let compacted_checkpoints = candidate.compaction_checkpoints;
+                let event = Event::HistoryCompacted {
+                    replaced_turns: ev.replaced_turns,
+                    replaced_messages: ev.replaced_messages,
+                    saved_tokens_estimate: ev.saved_tokens_estimate,
+                    checkpoint_id: ev.checkpoint_id,
+                    summary_message_id: ev.summary_message_id,
+                    first_kept_message_id: ev.first_kept_message_id,
+                    seq: 0, // assigned inside commit
+                };
+                // StateSnapshot deep-clones history, so commit()'s own
+                // rollback restores the pre-compaction state on persist
+                // failure — no manual bookkeeping needed.
+                self.commit(state, move |s| {
+                    s.history = compacted_history;
+                    s.history_ids = compacted_history_ids;
+                    s.next_message_seq = compacted_next_message_seq;
+                    s.next_checkpoint_seq = compacted_next_checkpoint_seq;
+                    s.compaction_checkpoints = compacted_checkpoints;
+                    let seq = s.next_seq();
+                    let mut e = event;
+                    if let Event::HistoryCompacted {
+                        seq: ref mut esq, ..
+                    } = e
+                    {
+                        *esq = seq;
                     }
-                }
-                Ok(None) => {}
-                Err(RuntimeError::Cancelled) => {
-                    let mut events = pre_events;
-                    events.extend(self.pause_host_requested(state).await?);
-                    return Ok(StepOutput {
-                        events,
-                        advanced: true,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "muagent::compaction",
-                        error = %e,
-                        class = error_class_label(e.classify()),
-                        "auto-compaction failed; continuing without compaction"
-                    );
-                }
+                    vec![e]
+                })
+                .await
+            }
+            Ok(None) => Ok(Vec::new()),
+            Err(RuntimeError::Cancelled) => Err(RuntimeError::Cancelled),
+            Err(RuntimeError::Store(e)) => Err(RuntimeError::Store(e)),
+            Err(e) => {
+                tracing::warn!(
+                    target: "muagent::compaction",
+                    error = %e,
+                    class = error_class_label(e.classify()),
+                    "auto-compaction failed; continuing without compaction"
+                );
+                Ok(Vec::new())
             }
         }
+    }
 
-        // L2 runtime facts. Keep minimal by default — day-level date + turn.
+    /// Compose the final `ModelRequest`: cacheable system prefix already in
+    /// `system`, plus L2 runtime facts, the L3 message tail, the routing
+    /// cache key, and the host-configured cache/thinking policies.
+    fn assemble_request(
+        &self,
+        state: &RunState,
+        system: String,
+        tools: Vec<crate::core::tool::ToolDescriptor>,
+        prompt_blocks: &[crate::core::prompt::PromptBlock],
+    ) -> ModelRequest {
+        // L2 runtime facts. Keep minimal by default — day-level date.
         let facts = crate::core::prompt::RuntimeFacts {
             now_ms: self.clock.now_ms(),
             turn: state.usage.turns.saturating_add(1),
             extra: vec![],
         };
         let mut runtime_context = facts.render();
-        append_section(&mut runtime_context, &render_runtime_blocks(&prompt_blocks));
+        append_section(&mut runtime_context, &render_runtime_blocks(prompt_blocks));
 
         let prompt_cache_key = match &self.cache_key_strategy {
-            CacheKeyStrategy::PrefixHash => Some(hash_cache_fingerprint(&system, &tools)),
+            CacheKeyStrategy::PrefixHash => Some(cache_fingerprint(&system, &tools)),
             CacheKeyStrategy::Session => Some(state.session_id.to_string()),
             CacheKeyStrategy::Fixed(s) => Some(s.clone()),
             CacheKeyStrategy::None => None,
@@ -571,7 +482,7 @@ impl Runner {
             insert_summary_recall_before_latest_user(&mut messages);
         }
 
-        let req = ModelRequest {
+        ModelRequest {
             system,
             runtime_context,
             messages,
@@ -587,83 +498,77 @@ impl Runner {
             // every new session lands on a backend that already cached the
             // agent's stable prefix from prior sessions.
             prompt_cache_key,
-        };
+        }
+    }
 
-        let reply = match self.model_turn_with_retry(req).await {
-            Ok(reply) => reply,
-            Err(RuntimeError::Cancelled) => {
-                let mut events = pre_events;
-                events.extend(self.pause_host_requested(state).await?);
-                return Ok(StepOutput {
-                    events,
-                    advanced: true,
+    /// Atomically commit a successful model reply: usage updates, assistant
+    /// push (with thinking artifacts), and the step transition to either
+    /// `ToolBatch` (tool calls present) or `Done` (final text). On persist
+    /// failure, `commit()` rolls back so a retry can re-call the model
+    /// without state divergence.
+    async fn commit_model_reply(
+        &self,
+        state: &mut RunState,
+        reply: ModelReply,
+    ) -> Result<Vec<Event>, RuntimeError> {
+        let usage = reply.usage;
+        let text = reply.text;
+        let thinking = reply.thinking;
+        let tool_calls = reply.tool_calls;
+        self.commit(state, move |s| {
+            s.usage.tokens_prompt = s.usage.tokens_prompt.saturating_add(usage.prompt_tokens);
+            s.usage.tokens_completion = s
+                .usage
+                .tokens_completion
+                .saturating_add(usage.completion_tokens);
+            s.usage.cost_usd += usage.cost_usd.unwrap_or(0.0);
+            s.usage.turns = s.usage.turns.saturating_add(1);
+            s.usage.tokens_cache_read = s
+                .usage
+                .tokens_cache_read
+                .saturating_add(usage.cache_read_tokens);
+            s.usage.tokens_cache_write = s
+                .usage
+                .tokens_cache_write
+                .saturating_add(usage.cache_write_tokens);
+            s.usage.tokens_thinking = s
+                .usage
+                .tokens_thinking
+                .saturating_add(usage.thinking_tokens);
+
+            s.push_assistant_with_thinking(&text, tool_calls.clone(), thinking);
+            let asst_seq = s.next_seq();
+            let mut events = vec![Event::AssistantMessage {
+                text: text.clone(),
+                seq: asst_seq,
+            }];
+            if tool_calls.is_empty() {
+                s.step = Step::Done { final_text: text };
+                let end_seq = s.next_seq();
+                events.push(Event::SessionEnd {
+                    ok: true,
+                    seq: end_seq,
                 });
+            } else {
+                s.step = Step::ToolBatch {
+                    calls: tool_calls,
+                    cursor: 0,
+                };
             }
-            Err(RuntimeError::Store(e)) => return Err(RuntimeError::Store(e)),
-            Err(e) => {
-                let mut events = pre_events;
-                events.extend(self.fail_run(state, e).await?);
-                return Ok(StepOutput {
-                    events,
-                    advanced: true,
-                });
-            }
-        };
+            events
+        })
+        .await
+    }
 
-        // Commit the model reply atomically: usage updates + assistant push
-        // + step transition + events. On persist failure, roll back so a
-        // retry can re-call the model without state divergence.
-        let usage = reply.usage.clone();
-        let text = reply.text.clone();
-        let thinking = reply.thinking.clone();
-        let tool_calls = reply.tool_calls.clone();
-        let post_events = self
-            .commit(state, |s| {
-                s.usage.tokens_prompt = s.usage.tokens_prompt.saturating_add(usage.prompt_tokens);
-                s.usage.tokens_completion = s
-                    .usage
-                    .tokens_completion
-                    .saturating_add(usage.completion_tokens);
-                s.usage.cost_usd += usage.cost_usd.unwrap_or(0.0);
-                s.usage.turns = s.usage.turns.saturating_add(1);
-                s.usage.tokens_cache_read = s
-                    .usage
-                    .tokens_cache_read
-                    .saturating_add(usage.cache_read_tokens);
-                s.usage.tokens_cache_write = s
-                    .usage
-                    .tokens_cache_write
-                    .saturating_add(usage.cache_write_tokens);
-                s.usage.tokens_thinking = s
-                    .usage
-                    .tokens_thinking
-                    .saturating_add(usage.thinking_tokens);
-
-                s.push_assistant_with_thinking(&text, tool_calls.clone(), thinking);
-                let asst_seq = s.next_seq();
-                let mut events = vec![Event::AssistantMessage {
-                    text: text.clone(),
-                    seq: asst_seq,
-                }];
-                if tool_calls.is_empty() {
-                    s.step = Step::Done { final_text: text };
-                    let end_seq = s.next_seq();
-                    events.push(Event::SessionEnd {
-                        ok: true,
-                        seq: end_seq,
-                    });
-                } else {
-                    s.step = Step::ToolBatch {
-                        calls: tool_calls,
-                        cursor: 0,
-                    };
-                }
-                events
-            })
-            .await?;
-
-        let mut events = pre_events;
-        events.extend(post_events);
+    /// Append a `Paused { HostRequested }` transition to the supplied
+    /// pre-events and return them as a single `StepOutput`. Used by the
+    /// cancellation paths in `on_model_turn`.
+    async fn pause_with(
+        &self,
+        state: &mut RunState,
+        mut events: Vec<Event>,
+    ) -> Result<StepOutput, RuntimeError> {
+        events.extend(self.pause_host_requested(state).await?);
         Ok(StepOutput {
             events,
             advanced: true,
@@ -781,7 +686,7 @@ impl Runner {
         let result = match internal_result {
             Some(result) => result,
             None => {
-                let cancel = self.cancel_token.lock().unwrap().child();
+                let cancel = self.cancel_lock().child();
                 self.tools
                     .execute(&call, &ctx, cancel)
                     .await
@@ -827,9 +732,11 @@ impl Runner {
         // already persisted intent so recover path triggers).
         let call_id = call.id.clone();
         let tool_name = call.tool_name.clone();
+        let call_args = call.args.clone();
         let res_ok = result.ok;
         let res_retryable = result.retryable;
         let res_brief = result.brief();
+        let res_detail = result.detail.clone().unwrap_or(serde_json::Value::Null);
         let result_for_push = result.clone();
         let events = self
             .commit(state, |s| {
@@ -845,6 +752,7 @@ impl Runner {
                     Event::ToolCallStart {
                         call_id: call_id.clone(),
                         tool: tool_name,
+                        args: call_args,
                         seq: start_seq,
                     },
                     Event::ToolCallEnd {
@@ -852,6 +760,7 @@ impl Runner {
                         ok: res_ok,
                         retryable: res_retryable,
                         brief: res_brief,
+                        detail: res_detail,
                         seq: end_seq,
                     },
                 ]
@@ -934,12 +843,39 @@ impl Runner {
         let events = f(state);
         state.updated_ms = self.clock.now_ms();
         state.ensure_history_ids();
-        state.retain_active_compaction_checkpoints();
+        // Compaction bookkeeping is opaque to core; the wired compactor is
+        // the only thing that knows how to clean dead checkpoints out of
+        // the persisted state.
+        if let Some(c) = &self.compactor {
+            c.retain_active_state(state);
+        }
+
+        // Validate that closures emit strictly-monotonic event seqs.
+        // Without this check a buggy closure that reuses or reorders seq
+        // values would silently produce inconsistent audit logs and only
+        // surface later as `StoreError::Corrupt` from the store. Failing
+        // fast inside `commit` localises the blame to the FSM transition
+        // that produced the bad sequence.
+        if let Err(e) = validate_event_seq(&events) {
+            snap.restore(state);
+            return Err(RuntimeError::Store(StoreError::Corrupt(format!(
+                "event seq invariant failed before save: {e}"
+            ))));
+        }
+
         if let Err(e) = state.validate_history_identity() {
             snap.restore(state);
             return Err(RuntimeError::Store(StoreError::Corrupt(format!(
                 "history identity invariant failed before save: {e}"
             ))));
+        }
+        if let Some(c) = &self.compactor {
+            if let Err(e) = c.validate_state(state) {
+                snap.restore(state);
+                return Err(RuntimeError::Store(StoreError::Corrupt(format!(
+                    "compaction invariant failed before save: {e}"
+                ))));
+            }
         }
         match self.store.save_delta(state, &events).await {
             Ok(()) => Ok(events),
@@ -949,6 +885,27 @@ impl Runner {
             }
         }
     }
+}
+
+/// Strict monotonicity check across a single commit's events. Each
+/// emitted event must carry `seq` strictly greater than the previous one
+/// in the same batch. The runner assigns seqs via `state.next_seq()`,
+/// which is monotonic by construction — this check guards against
+/// future closure logic that reuses or hand-builds seqs.
+fn validate_event_seq(events: &[Event]) -> Result<(), String> {
+    let mut last: Option<u64> = None;
+    for ev in events {
+        let seq = ev.seq();
+        if let Some(prev) = last {
+            if seq <= prev {
+                return Err(format!(
+                    "non-monotonic event seq: prev={prev} next={seq}"
+                ));
+            }
+        }
+        last = Some(seq);
+    }
+    Ok(())
 }
 
 fn side_effects_label(s: SideEffects) -> String {
@@ -1170,5 +1127,48 @@ impl RunnerBuilder {
             cache_key_strategy: self.cache_key_strategy,
             summary_recall: self.summary_recall,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_event_seq_accepts_strict_monotonic() {
+        let evs = vec![
+            Event::StepAdvanced { to: "a".into(), seq: 1 },
+            Event::StepAdvanced { to: "b".into(), seq: 2 },
+            Event::SessionEnd { ok: true, seq: 3 },
+        ];
+        assert!(validate_event_seq(&evs).is_ok());
+    }
+
+    #[test]
+    fn validate_event_seq_rejects_duplicate() {
+        let evs = vec![
+            Event::StepAdvanced { to: "a".into(), seq: 1 },
+            Event::StepAdvanced { to: "b".into(), seq: 1 },
+        ];
+        assert!(validate_event_seq(&evs).is_err());
+    }
+
+    #[test]
+    fn validate_event_seq_rejects_decreasing() {
+        let evs = vec![
+            Event::StepAdvanced { to: "a".into(), seq: 5 },
+            Event::StepAdvanced { to: "b".into(), seq: 3 },
+        ];
+        assert!(validate_event_seq(&evs).is_err());
+    }
+
+    #[test]
+    fn validate_event_seq_accepts_empty_and_single() {
+        assert!(validate_event_seq(&[]).is_ok());
+        assert!(validate_event_seq(&[Event::StepAdvanced {
+            to: "x".into(),
+            seq: 42,
+        }])
+        .is_ok());
     }
 }

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::core::clock::{Clock, SystemClock};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -570,10 +570,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    SystemClock.now_ms()
 }
 
 #[cfg(test)]

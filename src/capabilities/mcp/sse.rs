@@ -286,11 +286,9 @@ async fn flush_event(
     }
 
     match event_name.as_str() {
-        "endpoint" => {
-            if !*endpoint_sent {
-                send_endpoint(endpoint_tx, Ok(data));
-                *endpoint_sent = true;
-            }
+        "endpoint" if !*endpoint_sent => {
+            send_endpoint(endpoint_tx, Ok(data));
+            *endpoint_sent = true;
         }
         "message" => {
             let v: Value = serde_json::from_str(&data)

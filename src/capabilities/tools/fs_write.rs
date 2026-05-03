@@ -137,6 +137,18 @@ impl Tool for FsWrite {
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unknown".into());
 
+        // Line count of what we just wrote — append-mode contributes new
+        // lines on top of the existing file; overwrite mode replaces the
+        // file outright so this represents the new total. We don't claim
+        // lines_removed for overwrite (would require re-reading the old
+        // file) and report 0 for append/new-file paths where it's known.
+        let lines_added = count_lines_in_content(&a.content);
+        let known_lines_removed: Option<usize> = if a.append || previous_size.is_none() {
+            Some(0)
+        } else {
+            None
+        };
+
         Ok(ToolOk::text(format!(
             "fs_write ok: wrote {} bytes to {} (mode={mode}, previous_size={previous}, current_size={current})",
             a.content.len(),
@@ -148,6 +160,23 @@ impl Tool for FsWrite {
             "bytes_written": a.content.len(),
             "previous_size": previous_size,
             "current_size": current_size,
+            "lines_added": lines_added,
+            "lines_removed": known_lines_removed,
         })))
+    }
+}
+
+/// Count "logical lines" in a payload buffer. An empty content has 0 lines;
+/// a buffer without a trailing newline still counts the partial last line.
+/// Used purely for the diff-stats summary in `ToolResult.detail`.
+fn count_lines_in_content(s: &str) -> usize {
+    if s.is_empty() {
+        return 0;
+    }
+    let nl = s.bytes().filter(|b| *b == b'\n').count();
+    if s.ends_with('\n') {
+        nl
+    } else {
+        nl + 1
     }
 }

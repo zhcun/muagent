@@ -68,7 +68,10 @@ impl FileLedger {
                     self.absorb_tool_call(&c.tool_name, &c.args);
                 }
             }
-            Message::Observation { kind, text } if matches!(kind, ObsKind::Summary) => {
+            Message::Observation {
+                kind: ObsKind::Summary,
+                text,
+            } => {
                 self.absorb_rendered(text);
             }
             _ => {}

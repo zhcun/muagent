@@ -37,6 +37,13 @@ pub enum Event {
     ToolCallStart {
         call_id: CallId,
         tool: String,
+        /// Raw JSON args the tool was invoked with. Recorded verbatim so any
+        /// consumer (TUI, audit replay, JSON exporter) can render a faithful
+        /// "what was called" view without joining against `RunState.history`.
+        /// Defaulted on deserialise so older event logs that pre-date this
+        /// field still load.
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        args: serde_json::Value,
         seq: EventSeq,
     },
     ToolCallEnd {
@@ -44,6 +51,15 @@ pub enum Event {
         ok: bool,
         retryable: bool,
         brief: String,
+        /// Optional structured detail the tool returned alongside its text
+        /// content (mirrors `ToolResult.detail`). Carries machine-readable
+        /// per-tool metadata — e.g. `{ "lines_added": 3, "lines_removed": 1 }`
+        /// for fs_edit, `{ "exit_code": 0 }` for sh_exec — so UIs and audit
+        /// replay don't need to parse `brief` strings or join state history
+        /// to render structured indicators. Defaulted on deserialise so
+        /// older event logs continue to load.
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        detail: serde_json::Value,
         seq: EventSeq,
     },
     ToolIntentRecovered {

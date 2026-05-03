@@ -13,10 +13,11 @@ usage, configuration, build, and development references.
 
 Requirements:
 
-- Node.js 16+
 - Rust/Cargo 1.75+
 - Credentials for at least one model provider, such as `OPENROUTER_API_KEY` or
   `OPENAI_API_KEY`
+- Node.js 16+ is only needed if you install through the `npm install -g .`
+  shim; the `cargo install` path below has no Node dependency
 
 Install Rust first if it is not already available:
 
@@ -141,8 +142,7 @@ muagent/
 ├── CONFIG.md            # configuration reference
 ├── USAGE.md             # CLI and runtime usage
 ├── DEVELOPMENT.md       # local development notes
-├── BUILD.md             # cross-platform build and deployment
-└── RUN.md               # run/test commands and selected test map
+└── BUILD.md             # cross-platform build and deployment
 ```
 
 ## Documentation
@@ -155,5 +155,3 @@ muagent/
   benchmarks, and source layout
 - [BUILD.md](BUILD.md): cross-compilation, Raspberry Pi/Linux targets, and
   deployment checks
-- [RUN.md](RUN.md): quick runbook, troubleshooting, benchmark commands, and a
-  selected integration-test map

@@ -88,7 +88,8 @@ impl SessionStore for MemorySessionStore {
         }
         let mut state_for_store = state.clone();
         state_for_store.ensure_history_ids();
-        state_for_store.retain_active_compaction_checkpoints();
+        // Compaction-checkpoint retention is the wired Compactor's job; by
+        // the time we get here, Runner::commit has already invoked it.
         state_for_store
             .validate_history_identity()
             .map_err(|e| StoreError::Corrupt(format!("history identity invariant failed: {e}")))?;

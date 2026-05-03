@@ -101,11 +101,11 @@ fn cache_marked_system_message(system: &str) -> Value {
 ///
 /// - Official provider (api.openai.com) OR OpenRouter routing to a known
 ///   first-party family/model (`openai/*`, `anthropic/*`, `google/*`,
-///   `mistralai/*`, `meta-llama/*`, `cohere/*`, `moonshotai/kimi-k2*`) → trust it, enable all
-///   standard caps. Vision is family-based: official OpenAI/Azure OpenAI
-///   and OpenRouter `openai/*`, `anthropic/*`, `google/*` are treated as
-///   image-capable; other trusted families stay conservative unless
-///   overridden via `.with_caps()`.
+///   `mistralai/*`, `meta-llama/*`, `cohere/*`, `x-ai/*`,
+///   `moonshotai/kimi-k2*`) → trust it, enable all standard caps. Vision is
+///   family-based: official OpenAI/Azure OpenAI and OpenRouter `openai/*`,
+///   `anthropic/*`, `google/*`, `x-ai/*` are treated as image-capable; other
+///   trusted families stay conservative unless overridden via `.with_caps()`.
 ///
 /// - Anything else (raw 127.0.0.1 Ollama, vLLM self-hosted, unknown
 ///   cloud) → **conservative default**: native tool-use OFF, vision OFF,
@@ -168,7 +168,8 @@ fn family_has_vision(base_url: &str, model: &str) -> bool {
     if base_url.contains("openrouter.ai") {
         return model.starts_with("openai/")
             || model.starts_with("anthropic/")
-            || model.starts_with("google/");
+            || model.starts_with("google/")
+            || model.starts_with("x-ai/");
     }
     false
 }
@@ -223,6 +224,15 @@ mod caps_tests {
         );
         assert!(c.vision);
         assert!(c.prompt_cache);
+    }
+
+    #[test]
+    fn openrouter_xai_prefix_has_vision_and_thinking() {
+        let c = infer_caps("https://openrouter.ai/api/v1", "x-ai/grok-4.3");
+        assert!(c.native_tool_use);
+        assert!(c.vision);
+        assert!(c.prompt_cache);
+        assert!(matches!(c.thinking, ThinkingSupport::NoReplay));
     }
 
     #[test]

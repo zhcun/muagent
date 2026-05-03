@@ -181,17 +181,9 @@ impl RunState {
         self.ensure_history_ids();
     }
 
-    pub fn record_compaction_checkpoint(&mut self, checkpoint: CompactionCheckpoint) {
-        self.retain_active_compaction_checkpoints();
-        self.compaction_checkpoints.push(checkpoint);
-    }
-
-    pub fn retain_active_compaction_checkpoints(&mut self) {
-        let active_ids = self.history_ids.iter().collect::<BTreeSet<_>>();
-        self.compaction_checkpoints
-            .retain(|checkpoint| active_ids.contains(&checkpoint.summary_message_id));
-    }
-
+    /// Validate the history-id ledger. Compaction-specific checks live on
+    /// the `Compactor` trait (`validate_state`) — core stays unaware of
+    /// the compaction checkpoint shape.
     pub fn validate_history_identity(&self) -> Result<(), String> {
         if self.history.len() != self.history_ids.len() {
             return Err(format!(
@@ -208,77 +200,6 @@ impl RunState {
             }
             if !seen.insert(id) {
                 return Err(format!("duplicate history id `{id}`"));
-            }
-        }
-
-        let checkpoint_ids = self
-            .compaction_checkpoints
-            .iter()
-            .map(|checkpoint| checkpoint.checkpoint_id.as_str())
-            .collect::<Vec<_>>();
-        let mut seen_checkpoints = BTreeSet::new();
-        for id in checkpoint_ids {
-            if id.trim().is_empty() {
-                return Err("compaction checkpoint id is empty".into());
-            }
-            if !seen_checkpoints.insert(id) {
-                return Err(format!("duplicate compaction checkpoint id `{id}`"));
-            }
-        }
-
-        let active_ids = self.history_ids.iter().collect::<BTreeSet<_>>();
-        for checkpoint in &self.compaction_checkpoints {
-            let Some(summary_index) = self
-                .history_ids
-                .iter()
-                .position(|id| id == &checkpoint.summary_message_id)
-            else {
-                return Err(format!(
-                    "checkpoint `{}` references missing summary message id `{}`",
-                    checkpoint.checkpoint_id, checkpoint.summary_message_id
-                ));
-            };
-            match &self.history[summary_index] {
-                Message::Observation {
-                    kind: ObsKind::Summary,
-                    ..
-                } => {}
-                _ => {
-                    return Err(format!(
-                        "checkpoint `{}` summary_message_id `{}` does not point to a summary observation",
-                        checkpoint.checkpoint_id, checkpoint.summary_message_id
-                    ));
-                }
-            }
-
-            if checkpoint.removed_message_range.count != 0
-                && checkpoint.removed_message_range.count != checkpoint.replaced_messages
-            {
-                return Err(format!(
-                    "checkpoint `{}` removed range count {} != replaced_messages {}",
-                    checkpoint.checkpoint_id,
-                    checkpoint.removed_message_range.count,
-                    checkpoint.replaced_messages
-                ));
-            }
-            if checkpoint.removed_message_range.count == 0
-                && !checkpoint.removed_message_ids.is_empty()
-                && checkpoint.removed_message_ids.len() != checkpoint.replaced_messages
-            {
-                return Err(format!(
-                    "checkpoint `{}` removed id list length {} != replaced_messages {}",
-                    checkpoint.checkpoint_id,
-                    checkpoint.removed_message_ids.len(),
-                    checkpoint.replaced_messages
-                ));
-            }
-            for pinned_id in &checkpoint.pinned_message_ids {
-                if !active_ids.contains(pinned_id) {
-                    return Err(format!(
-                        "checkpoint `{}` pinned missing message id `{pinned_id}`",
-                        checkpoint.checkpoint_id
-                    ));
-                }
             }
         }
 

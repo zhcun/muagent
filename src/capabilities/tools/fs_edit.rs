@@ -240,12 +240,29 @@ impl Tool for FsEdit {
             summary.push_str(&diff);
         }
 
+        // Per-replacement line deltas: count newlines in the old slice we
+        // overwrote vs the new slice we wrote in. Aggregated as
+        // {lines_added, lines_removed} so any consumer (TUI / audit replay)
+        // can render `Update(path) +N -M` without reparsing the diff.
+        let (lines_added, lines_removed) = replacements.iter().fold(
+            (0usize, 0usize),
+            |(add, rem), r| {
+                let old_slice = &base[r.start..r.end];
+                (
+                    add + count_lines_in_slice(&r.new_text),
+                    rem + count_lines_in_slice(old_slice),
+                )
+            },
+        );
+
         Ok(ToolOk::text(summary).with_detail(json!({
             "uri": uri.as_str(),
             "dry_run": a.dry_run,
             "replacements": replacements.len(),
             "bytes_before": raw.len(),
             "bytes_after": final_text.len(),
+            "lines_added": lines_added,
+            "lines_removed": lines_removed,
             "first_changed_line": first_changed_line,
             "changed_lines": changed_lines.iter().copied().collect::<Vec<_>>(),
             "diff_preview": diff,
@@ -378,6 +395,22 @@ fn occurrences(haystack: &str, needle: &str) -> Vec<usize> {
         offset = idx + needle.len();
     }
     out
+}
+
+/// Lines spanned by a slice of text. An empty slice contributes 0; a slice
+/// without a trailing newline still counts the partial line at the end.
+/// Used to derive "+N -M" deltas for fs_edit's `ToolResult.detail` so any
+/// consumer can render diff stats without re-running the diff.
+fn count_lines_in_slice(s: &str) -> usize {
+    if s.is_empty() {
+        return 0;
+    }
+    let nl = s.bytes().filter(|b| *b == b'\n').count();
+    if s.ends_with('\n') {
+        nl
+    } else {
+        nl + 1
+    }
 }
 
 fn changed_lines(base: &str, replacements: &[Replacement]) -> BTreeSet<usize> {

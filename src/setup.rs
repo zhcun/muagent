@@ -1,7 +1,6 @@
 //! Wire together everything a CLI session needs, from Config.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapters::linux::{LinuxFileSystem, LinuxProcessExec};
 use crate::adapters::AdapterBundle;
@@ -175,7 +174,7 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
         }
     };
 
-    let retry_policy = retry_policy_from_env()?;
+    let retry_policy = RetryPolicy::from_env()?;
 
     let runner = Runner::builder()
         .model(model)
@@ -211,7 +210,10 @@ fn system_prompt(cfg: &Config) -> String {
         s.push_str(&instructions.render());
     }
     s.push_str("\nRuntime environment:\n");
-    s.push_str(&format!("- Current date: {}\n", current_utc_date()));
+    s.push_str(&format!(
+        "- Current date: {}\n",
+        crate::core::clock::utc_date_string(crate::core::clock::SystemClock.now_ms())
+    ));
     s.push_str(&format!(
         "- Operating system: {} ({})\n",
         std::env::consts::OS,
@@ -234,72 +236,6 @@ fn system_prompt(cfg: &Config) -> String {
         ));
     }
     s
-}
-
-fn current_utc_date() -> String {
-    let days = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() / 86_400)
-        .unwrap_or(0);
-    let (year, month, day) = civil_from_days(days as i64);
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-fn retry_policy_from_env() -> Result<RetryPolicy, String> {
-    let mut policy = RetryPolicy::default();
-    if let Some(value) = env_u32("MUAGENT_MODEL_RETRY_ATTEMPTS")? {
-        policy.max_attempts = value.max(1);
-    }
-    if let Some(value) = env_u64("MUAGENT_MODEL_RETRY_INITIAL_MS")? {
-        policy.initial_backoff_ms = value;
-    }
-    if let Some(value) = env_u64("MUAGENT_MODEL_RETRY_MAX_MS")? {
-        policy.max_backoff_ms = value;
-    }
-    if policy.max_backoff_ms < policy.initial_backoff_ms {
-        policy.max_backoff_ms = policy.initial_backoff_ms;
-    }
-    Ok(policy)
-}
-
-fn env_u32(name: &str) -> Result<Option<u32>, String> {
-    match std::env::var(name) {
-        Ok(raw) if raw.trim().is_empty() => Ok(None),
-        Ok(raw) => raw
-            .parse::<u32>()
-            .map(Some)
-            .map_err(|_| format!("{name} must be an unsigned integer")),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(format!("{name}: {e}")),
-    }
-}
-
-fn env_u64(name: &str) -> Result<Option<u64>, String> {
-    match std::env::var(name) {
-        Ok(raw) if raw.trim().is_empty() => Ok(None),
-        Ok(raw) => raw
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| format!("{name} must be an unsigned integer")),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(format!("{name}: {e}")),
-    }
-}
-
-// Howard Hinnant's civil calendar conversion, adapted for days since Unix
-// epoch. Keeps CLI dependencies small while giving a stable YYYY-MM-DD string.
-fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    y += if m <= 2 { 1 } else { 0 };
-    (y as i32, m as u32, d as u32)
 }
 
 /// Construct a `ModelAdapter` from a `ModelConfig`. Used for both the main

@@ -44,4 +44,22 @@ pub trait Compactor: Send + Sync {
         system_prompt: &str,
         cancel: CancelToken,
     ) -> Result<Option<CompactionEvent>, RuntimeError>;
+
+    /// Drop bookkeeping that no longer corresponds to live history (e.g.
+    /// compaction checkpoints whose summary message was itself rolled out
+    /// of `history`). Called by Runner inside `commit` so the persisted
+    /// state stays self-consistent.
+    ///
+    /// Default no-op: a compactor that doesn't track durable bookkeeping
+    /// has nothing to retain.
+    fn retain_active_state(&self, _state: &mut RunState) {}
+
+    /// Validate compaction-specific invariants on `state` before persist.
+    /// Called by Runner after `RunState::validate_history_identity`. Keeps
+    /// compaction-shaped consistency checks out of `core` proper.
+    ///
+    /// Default `Ok(())`.
+    fn validate_state(&self, _state: &RunState) -> Result<(), String> {
+        Ok(())
+    }
 }

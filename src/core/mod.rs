@@ -48,7 +48,7 @@ pub mod prelude {
     pub use crate::core::clock::SystemClock;
 
     pub use crate::core::{
-        cache::CachePolicy,
+        cache::{CacheKeyStrategy, CachePolicy},
         cancel::CancelToken,
         clock::{BudgetHint, Clock},
         compactor::{CompactionEvent, Compactor},

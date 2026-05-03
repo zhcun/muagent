@@ -12,12 +12,15 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{parse_list_arg, ConfigOverrides};
 
 /// Single source of truth for interactive command list. Both `/help` and the CLI
-/// `--help` read from here so the two views stay aligned.
+/// `--help` read from here so the two views stay aligned. The TUI's tab
+/// completion derives its candidate list from this same table via
+/// [`repl_command_names`].
 pub const REPL_COMMANDS: &[(&str, &str)] = &[
     ("/help", "show this help"),
     ("/new", "start a new session (drop history)"),
     ("/tokens", "show token usage for current session"),
     ("/history", "print last 20 messages briefly"),
+    ("/doctor", "check provider/config readiness"),
     ("/model [model_id]", "show or switch model for this session"),
     (
         "/provider [name] [model_id]",
@@ -34,6 +37,17 @@ pub const REPL_COMMANDS: &[(&str, &str)] = &[
     ("/search <query>", "search persisted session history"),
     ("/quit | /exit", "exit"),
 ];
+
+/// Pull bare command names out of [`REPL_COMMANDS`] (e.g. `/model` from
+/// `"/model [model_id]"`, both `/quit` and `/exit` from `"/quit | /exit"`).
+/// The TUI feeds this into tab completion so the completion candidates are
+/// always in sync with the documented command set.
+pub fn repl_command_names() -> impl Iterator<Item = &'static str> {
+    REPL_COMMANDS
+        .iter()
+        .flat_map(|(spec, _)| spec.split_whitespace())
+        .filter(|tok| tok.starts_with('/'))
+}
 
 /// What main decides to do after parsing argv.
 pub enum Action {
@@ -76,6 +90,11 @@ pub enum RunMode {
 
 impl RunMode {
     pub fn uses_tui_session(&self) -> bool {
+        #[cfg(not(feature = "tui"))]
+        {
+            false
+        }
+        #[cfg(feature = "tui")]
         matches!(
             self,
             RunMode::Tui { .. }
@@ -256,7 +275,7 @@ fn parse_from(args: Vec<String>) -> Action {
             "resume" => {
                 return parse_resume(&args[i + 1..], false, tui, images, config);
             }
-            "sessions" | "list" => {
+            "sessions" | "session" | "list" => {
                 return parse_sessions(&args[i + 1..], images, config);
             }
             "repl" => {
@@ -309,13 +328,18 @@ fn parse_from(args: Vec<String>) -> Action {
     )
 }
 
-fn parse_exec(args: &[String], mut images: Vec<String>, config: ConfigOverrides) -> Action {
+fn parse_exec(args: &[String], mut images: Vec<String>, mut config: ConfigOverrides) -> Action {
     if args.is_empty() {
         eprintln!("muagent: `exec` requires a prompt, or `exec resume --last <prompt>`");
         return Action::Exit(ExitCode::from(2));
     }
     let mut i = 0;
     while i < args.len() {
+        match parse_common_option(args, &mut i, &mut config, Some(&mut images), None) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(action) => return action,
+        }
         match args[i].as_str() {
             "--image" | "-i" => {
                 if let Some(v) = args.get(i + 1) {
@@ -346,9 +370,9 @@ fn parse_exec(args: &[String], mut images: Vec<String>, config: ConfigOverrides)
 fn parse_resume(
     args: &[String],
     prompt_required: bool,
-    tui: bool,
+    mut tui: bool,
     mut images: Vec<String>,
-    config: ConfigOverrides,
+    mut config: ConfigOverrides,
 ) -> Action {
     if args.is_empty() && !prompt_required {
         return run(RunMode::ResumePicker { all: false }, images, config);
@@ -362,8 +386,13 @@ fn parse_resume(
     let mut last = false;
     let mut all = false;
     let mut session_id: Option<String> = None;
-    let mut prompt_from_first_arg: Option<String> = None;
+    let mut prompt_start: Option<usize> = None;
     while i < args.len() {
+        match parse_common_option(args, &mut i, &mut config, Some(&mut images), Some(&mut tui)) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(action) => return action,
+        }
         let a = &args[i];
         match a.as_str() {
             "-h" | "--help" => {
@@ -380,45 +409,28 @@ fn parse_resume(
             }
             "--" => {
                 i += 1;
+                prompt_start = Some(i);
                 break;
-            }
-            "--image" | "-i" => {
-                if let Some(v) = args.get(i + 1) {
-                    push_image_list(&mut images, v);
-                    i += 2;
-                } else {
-                    return Action::Exit(missing(a));
-                }
             }
             other if other.starts_with('-') => {
                 eprintln!("muagent: unknown resume argument `{other}`. Try --help.");
                 return Action::Exit(ExitCode::from(2));
             }
             other => {
-                if !last && session_id.is_none() {
-                    if uuid::Uuid::parse_str(other).is_ok() {
-                        session_id = Some(other.to_string());
-                        i += 1;
-                        if args.get(i).map(String::as_str) == Some("--") {
-                            i += 1;
-                        }
-                    } else {
-                        prompt_from_first_arg = Some(args[i..].join(" "));
-                        i = args.len();
-                    }
+                if !last && session_id.is_none() && uuid::Uuid::parse_str(other).is_ok() {
+                    session_id = Some(other.to_string());
+                    i += 1;
+                    continue;
                 }
+                prompt_start = Some(i);
                 break;
             }
         }
     }
 
-    let prompt = if let Some(prompt) = prompt_from_first_arg {
-        Some(prompt)
-    } else if i < args.len() {
-        Some(args[i..].join(" "))
-    } else {
-        None
-    };
+    let prompt = prompt_start
+        .filter(|start| *start < args.len())
+        .map(|start| args[start..].join(" "));
     if prompt_required && prompt.as_deref().unwrap_or("").trim().is_empty() {
         eprintln!("muagent: `exec resume` requires a prompt");
         return Action::Exit(ExitCode::from(2));
@@ -444,13 +456,20 @@ fn parse_resume(
     }
 }
 
-fn parse_sessions(args: &[String], images: Vec<String>, config: ConfigOverrides) -> Action {
+fn parse_sessions(args: &[String], images: Vec<String>, mut config: ConfigOverrides) -> Action {
     if !images.is_empty() {
         eprintln!("muagent: sessions does not accept --image");
         return Action::Exit(ExitCode::from(2));
     }
     let mut all = false;
-    for a in args {
+    let mut i = 0;
+    while i < args.len() {
+        match parse_common_option(args, &mut i, &mut config, None, None) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(action) => return action,
+        }
+        let a = &args[i];
         match a.as_str() {
             "-h" | "--help" => {
                 print_help();
@@ -462,8 +481,108 @@ fn parse_sessions(args: &[String], images: Vec<String>, config: ConfigOverrides)
                 return Action::Exit(ExitCode::from(2));
             }
         }
+        i += 1;
     }
     run(RunMode::ListSessions { all }, images, config)
+}
+
+fn parse_common_option(
+    args: &[String],
+    i: &mut usize,
+    config: &mut ConfigOverrides,
+    images: Option<&mut Vec<String>>,
+    tui: Option<&mut bool>,
+) -> Result<bool, Action> {
+    let a = &args[*i];
+    match a.as_str() {
+        "--tui" => {
+            if let Some(tui) = tui {
+                *tui = true;
+                *i += 1;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        "--repl" => {
+            if let Some(tui) = tui {
+                *tui = false;
+                *i += 1;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        "--config-file" => value(args, i, a, |v| config.config_file = Some(v)),
+        "--provider" => value(args, i, a, |v| config.provider = Some(v)),
+        "--model" | "-m" => value(args, i, a, |v| config.model = Some(v)),
+        "--base-url" => value(args, i, a, |v| config.base_url = Some(v)),
+        "--store" => value(args, i, a, |v| config.store = Some(v)),
+        "--root" => value(args, i, a, |v| config.root = Some(v)),
+        "--cache" => value(args, i, a, |v| config.cache = Some(v)),
+        "--thinking" => value(args, i, a, |v| config.thinking = Some(v)),
+        "--log" => value(args, i, a, |v| config.log = Some(v)),
+        "--mcp-sse" => value(args, i, a, |v| push_config_list(&mut config.mcp_sse, &v)),
+        "--tools" | "--enable-tools" => value(args, i, a, |v| {
+            config.tool_allowlist = Some(parse_list_arg(&v))
+        }),
+        "--disable-tools" => value(args, i, a, |v| {
+            config.tool_denylist = Some(parse_list_arg(&v))
+        }),
+        "--skills" | "--enable-skills" => value(args, i, a, |v| {
+            config.skill_allowlist = Some(parse_list_arg(&v))
+        }),
+        "--disable-skills" => value(args, i, a, |v| {
+            config.skill_denylist = Some(parse_list_arg(&v))
+        }),
+        "--no-skills-autoload" => {
+            config.skill_autoload = Some(false);
+            *i += 1;
+            Ok(true)
+        }
+        "--max-tokens" => {
+            let Some(v) = args.get(*i + 1).cloned() else {
+                return Err(Action::Exit(missing(a)));
+            };
+            match v.parse::<u32>() {
+                Ok(n) => {
+                    config.max_tokens = Some(n);
+                    *i += 2;
+                    Ok(true)
+                }
+                Err(_) => {
+                    eprintln!("muagent: `{a}` requires an integer value");
+                    Err(Action::Exit(ExitCode::from(2)))
+                }
+            }
+        }
+        "--image" | "-i" => {
+            let Some(images) = images else {
+                return Ok(false);
+            };
+            let Some(v) = args.get(*i + 1) else {
+                return Err(Action::Exit(missing(a)));
+            };
+            push_image_list(images, v);
+            *i += 2;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn value(
+    args: &[String],
+    i: &mut usize,
+    a: &str,
+    apply: impl FnOnce(String),
+) -> Result<bool, Action> {
+    let Some(v) = args.get(*i + 1).cloned() else {
+        return Err(Action::Exit(missing(a)));
+    };
+    apply(v);
+    *i += 2;
+    Ok(true)
 }
 
 fn run(mode: RunMode, images: Vec<String>, config: ConfigOverrides) -> Action {
@@ -679,6 +798,11 @@ mod tests {
     }
 
     #[test]
+    fn singular_session_lists_sessions() {
+        assert_eq!(mode(&["session"]), RunMode::ListSessions { all: false });
+    }
+
+    #[test]
     fn positional_prompt_starts_tui_with_initial_prompt() {
         assert_eq!(
             mode(&["Explain", "this", "codebase"]),
@@ -761,6 +885,103 @@ mod tests {
                 tui: false,
             }
         );
+    }
+
+    #[test]
+    fn resume_accepts_config_flags_after_subcommand() {
+        let got = invocation(&[
+            "resume",
+            "--provider",
+            "openai-codex",
+            "--model",
+            "gpt-5.4",
+            "--root",
+            "/tmp/work",
+            "--store",
+            "memory",
+        ]);
+        assert_eq!(got.mode, RunMode::ResumePicker { all: false });
+        assert_eq!(got.config.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(got.config.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(got.config.root.as_deref(), Some("/tmp/work"));
+        assert_eq!(got.config.store.as_deref(), Some("memory"));
+    }
+
+    #[test]
+    fn resume_repl_flag_after_subcommand_is_respected() {
+        assert_eq!(
+            mode(&["resume", "--repl", "--last"]),
+            RunMode::ResumeLast {
+                prompt: None,
+                tui: false,
+            }
+        );
+    }
+
+    #[test]
+    fn exec_resume_accepts_config_flags_after_resume() {
+        let got = invocation(&[
+            "exec",
+            "resume",
+            "--provider",
+            "openai-codex",
+            "--last",
+            "continue",
+        ]);
+        assert_eq!(
+            got.mode,
+            RunMode::ResumeLast {
+                prompt: Some("continue".into()),
+                tui: false,
+            }
+        );
+        assert_eq!(got.config.provider.as_deref(), Some("openai-codex"));
+    }
+
+    #[test]
+    fn resume_session_accepts_config_flags_after_session_id() {
+        let session_id = "36dc8f89-57f0-46cf-9510-f6641fc86706";
+        let got = invocation(&[
+            "resume",
+            session_id,
+            "--provider",
+            "openai-codex",
+            "--model",
+            "gpt-5.4-nano",
+            "continue",
+        ]);
+        assert_eq!(
+            got.mode,
+            RunMode::ResumeSession {
+                session_id: session_id.into(),
+                prompt: Some("continue".into()),
+                tui: false,
+            }
+        );
+        assert_eq!(got.config.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(got.config.model.as_deref(), Some("gpt-5.4-nano"));
+    }
+
+    #[test]
+    fn exec_resume_session_accepts_config_flags_after_session_id() {
+        let session_id = "36dc8f89-57f0-46cf-9510-f6641fc86706";
+        let got = invocation(&[
+            "exec",
+            "resume",
+            session_id,
+            "--provider",
+            "openai-codex",
+            "continue",
+        ]);
+        assert_eq!(
+            got.mode,
+            RunMode::ResumeSession {
+                session_id: session_id.into(),
+                prompt: Some("continue".into()),
+                tui: false,
+            }
+        );
+        assert_eq!(got.config.provider.as_deref(), Some("openai-codex"));
     }
 
     #[test]

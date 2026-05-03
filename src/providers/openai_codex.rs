@@ -459,9 +459,7 @@ fn parse_codex_sse(body: &[u8]) -> Result<ModelReply, ModelError> {
                 }
             }
             "response.content_part.added" => {
-                if active_message.is_none() {
-                    active_message = Some(MessageAccum::default());
-                }
+                active_message.get_or_insert_with(MessageAccum::default);
             }
             "response.output_text.delta" | "response.refusal.delta" => {
                 let delta = event.get("delta").and_then(Value::as_str).unwrap_or("");
@@ -506,7 +504,7 @@ fn parse_codex_sse(body: &[u8]) -> Result<ModelReply, ModelError> {
                     }
                     Some("function_call") => {
                         let call_id = item_str(item, "call_id")
-                            .or_else(|| active_tool_call_id.as_deref())
+                            .or(active_tool_call_id.as_deref())
                             .unwrap_or("codex_tool_call")
                             .to_string();
                         let mut accum = tool_accums.remove(&call_id).unwrap_or_default();

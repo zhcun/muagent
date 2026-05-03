@@ -291,7 +291,10 @@ impl CompactionStrategy for SummaryCompaction {
             let summary_checkpoint_message_id = checkpoint.summary_message_id.clone();
             let first_kept_message_id = checkpoint.first_kept_message_id.clone();
             state.replace_history_with_ids(next_history, next_history_ids);
-            state.record_compaction_checkpoint(checkpoint);
+            // Drop dead checkpoints first (their summary messages may have
+            // just been replaced by this round's compaction), then push.
+            retain_active_compaction_checkpoints(state);
+            state.compaction_checkpoints.push(checkpoint);
 
             let outcome = CompactionOutcome {
                 replaced_turns: plan.replaced_turns,
@@ -721,6 +724,99 @@ impl<S: CompactionStrategy> Compactor for RunnerCompactor<S> {
             Err(CompactionError::NothingToCompact) => Ok(None),
         }
     }
+
+    fn retain_active_state(&self, state: &mut RunState) {
+        retain_active_compaction_checkpoints(state);
+    }
+
+    fn validate_state(&self, state: &RunState) -> Result<(), String> {
+        validate_compaction_checkpoints(state)
+    }
+}
+
+/// Drop checkpoints whose `summary_message_id` is no longer in
+/// `history_ids` — typically because a later compaction round replaced
+/// the summary itself. Free function so the storage layer can call it
+/// directly when not running through `Runner`.
+pub fn retain_active_compaction_checkpoints(state: &mut RunState) {
+    let active_ids: std::collections::BTreeSet<&String> = state.history_ids.iter().collect();
+    state
+        .compaction_checkpoints
+        .retain(|cp| active_ids.contains(&cp.summary_message_id));
+}
+
+/// Validate compaction-shaped invariants on `state`. Mirrors the checks
+/// that used to live inside `RunState::validate_history_identity` before
+/// compaction was decoupled from core.
+pub fn validate_compaction_checkpoints(state: &RunState) -> Result<(), String> {
+    let mut seen_checkpoints = std::collections::BTreeSet::new();
+    for cp in &state.compaction_checkpoints {
+        if cp.checkpoint_id.trim().is_empty() {
+            return Err("compaction checkpoint id is empty".into());
+        }
+        if !seen_checkpoints.insert(cp.checkpoint_id.as_str()) {
+            return Err(format!(
+                "duplicate compaction checkpoint id `{}`",
+                cp.checkpoint_id
+            ));
+        }
+    }
+
+    let active_ids: std::collections::BTreeSet<&String> = state.history_ids.iter().collect();
+    for cp in &state.compaction_checkpoints {
+        let Some(summary_index) = state
+            .history_ids
+            .iter()
+            .position(|id| id == &cp.summary_message_id)
+        else {
+            return Err(format!(
+                "checkpoint `{}` references missing summary message id `{}`",
+                cp.checkpoint_id, cp.summary_message_id
+            ));
+        };
+        match &state.history[summary_index] {
+            Message::Observation {
+                kind: ObsKind::Summary,
+                ..
+            } => {}
+            _ => {
+                return Err(format!(
+                    "checkpoint `{}` summary_message_id `{}` does not point to a summary observation",
+                    cp.checkpoint_id, cp.summary_message_id
+                ));
+            }
+        }
+
+        if cp.removed_message_range.count != 0
+            && cp.removed_message_range.count != cp.replaced_messages
+        {
+            return Err(format!(
+                "checkpoint `{}` removed range count {} != replaced_messages {}",
+                cp.checkpoint_id, cp.removed_message_range.count, cp.replaced_messages
+            ));
+        }
+        if cp.removed_message_range.count == 0
+            && !cp.removed_message_ids.is_empty()
+            && cp.removed_message_ids.len() != cp.replaced_messages
+        {
+            return Err(format!(
+                "checkpoint `{}` removed id list length {} != replaced_messages {}",
+                cp.checkpoint_id,
+                cp.removed_message_ids.len(),
+                cp.replaced_messages
+            ));
+        }
+        for pinned_id in &cp.pinned_message_ids {
+            if !active_ids.contains(pinned_id) {
+                return Err(format!(
+                    "checkpoint `{}` pinned missing message id `{pinned_id}`",
+                    cp.checkpoint_id
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // =============================================================================

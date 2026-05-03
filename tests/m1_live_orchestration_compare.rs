@@ -99,16 +99,14 @@ fn agent_loop_step(i: usize) -> Vec<Message> {
 /// start. Mirrors `EnvironmentContext::body()` from
 /// codex-rs/core/src/context/environment_context.rs but kept compact.
 fn codex_style_env_message() -> Message {
-    let body = format!(
-        "<environment_context>\n  \
-         <cwd>/Users/test/workspace</cwd>\n  \
-         <shell>zsh</shell>\n  \
-         <current_date>2026-04-27</current_date>\n  \
-         <timezone>UTC</timezone>\n  \
-         <os>macos (aarch64)</os>\n  \
-         <fs_root>/Users/test/workspace</fs_root>\n\
-         </environment_context>"
-    );
+    let body = "<environment_context>\n  \
+                <cwd>/Users/test/workspace</cwd>\n  \
+                <shell>zsh</shell>\n  \
+                <current_date>2026-04-27</current_date>\n  \
+                <timezone>UTC</timezone>\n  \
+                <os>macos (aarch64)</os>\n  \
+                <fs_root>/Users/test/workspace</fs_root>\n\
+                </environment_context>";
     Message::User {
         content: Content::text(body),
     }

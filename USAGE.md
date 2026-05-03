@@ -9,8 +9,8 @@ development commands.
 
 Requirements:
 
-- Node.js 16+
 - Rust/Cargo 1.75+
+- Node.js 16+, only if you use the `npm install -g .` shim below
 
 Install Rust first if needed:
 

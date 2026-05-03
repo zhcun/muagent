@@ -4,6 +4,14 @@ This document covers local development, tests, benchmarks, and the source tree.
 User-facing CLI usage is in [USAGE.md](USAGE.md), configuration is in
 [CONFIG.md](CONFIG.md), and cross-platform builds are in [BUILD.md](BUILD.md).
 
+## Install Rust
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+rustc --version      # expected: 1.75 or newer
+```
+
 ## Common Commands
 
 ```bash
@@ -21,14 +29,33 @@ cargo test --test cli_smoke
 cargo test --test m0_core
 ```
 
+Run focused tests:
+
+```bash
+cargo test -p muagent --test m0_core t1_tool_batch_multi_call_sequential
+cargo test -p muagent --test m0_shell t6_panic_becomes_tool_result
+```
+
 Run the current workspace version without installing:
 
 ```bash
+cargo run --bin muagent -- --help
 cargo run --bin muagent -- "Run one task with the current checkout."
+cargo run --bin muagent -- repl
 ```
 
 Live provider tests usually require API keys and may be marked `ignored`. For
 offline development, prefer unit/integration tests and CLI smoke tests.
+
+## Troubleshooting
+
+- `command not found: cargo`: install Rust with rustup and reload the shell.
+- `error[E0432]: unresolved import`: check the corresponding `mod.rs` or
+  `src/lib.rs` export.
+- Macro resolution or Tokio runtime errors: check the `tokio` features in
+  `Cargo.toml`; tests generally need `macros`, `rt`, and `time`.
+- Live provider failures: confirm the provider key, model, base URL, and
+  whether the test is expected to be ignored by default.
 
 ## Benchmark
 
@@ -91,10 +118,13 @@ muagent/
 │   ├── capabilities/     # built-in tools, skills, MCP
 │   ├── sessions/         # session manager, compaction, archive
 │   ├── storage/          # JSONL and memory stores
-│   ├── tui.rs            # optional ratatui/crossterm UI
-│   └── adapters/         # filesystem, process, reqwest, platform adapters
+│   ├── tui/              # optional ratatui/crossterm UI
+│   ├── adapters/         # filesystem, process, reqwest, platform adapters
+│   ├── cli.rs            # CLI argument parsing and dispatch
+│   ├── agent_instructions.rs  # AGENT.md / AGENTS.md / CLAUDE.md loader
+│   ├── oauth.rs          # OpenAI Codex OAuth helpers
+│   └── setup.rs          # default wiring
 ├── tests/                # integration tests
 ├── evals/                # local benchmark binary
-├── RUN.md                # run/test commands and selected test map
 └── BUILD.md              # build and deployment notes
 ```

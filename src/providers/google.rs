@@ -642,7 +642,7 @@ fn google_thought_signature_for_tool(
             .and_then(|v| v.as_u64())
             .and_then(|n| usize::try_from(n).ok())?;
         (index == tool_call_index)
-            .then(|| artifact.provider_signature.as_deref())
+            .then_some(artifact.provider_signature.as_deref())
             .flatten()
     })
 }

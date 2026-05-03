@@ -15,6 +15,13 @@ fn state(session: Uuid) -> RunState {
     RunState::new(Uuid::new_v4(), session, 100)
 }
 
+fn add_user_message(state: &mut RunState, text: &str) {
+    state.history.push(Message::User {
+        content: Content::text(text),
+    });
+    state.ensure_history_ids();
+}
+
 // ============ SessionManager tests ============
 
 #[tokio::test]
@@ -27,6 +34,7 @@ async fn session_list_aggregates_runs() {
 
     // s1 has 2 runs
     let mut r1 = state(s1);
+    add_user_message(&mut r1, "first");
     r1.step = Step::Done {
         final_text: "a".into(),
     };
@@ -34,6 +42,7 @@ async fn session_list_aggregates_runs() {
     store.save_delta(&r1, &[]).await.unwrap();
 
     let mut r2 = state(s1);
+    add_user_message(&mut r2, "second");
     r2.step = Step::Done {
         final_text: "b".into(),
     };
@@ -42,6 +51,7 @@ async fn session_list_aggregates_runs() {
 
     // s2 has 1
     let mut r3 = state(s2);
+    add_user_message(&mut r3, "third");
     r3.step = Step::Paused {
         reason: muagent::core::step::PauseReason::HostRequested,
     };
@@ -66,6 +76,7 @@ async fn session_list_filters_by_workspace_root() {
 
     let mut r1 = state(s1);
     r1.workspace_root = Some("/repo/a".into());
+    add_user_message(&mut r1, "repo a");
     r1.step = Step::Done {
         final_text: "a".into(),
     };
@@ -73,6 +84,7 @@ async fn session_list_filters_by_workspace_root() {
 
     let mut r2 = state(s2);
     r2.workspace_root = Some("/repo/b".into());
+    add_user_message(&mut r2, "repo b");
     r2.step = Step::Done {
         final_text: "b".into(),
     };
@@ -85,6 +97,61 @@ async fn session_list_filters_by_workspace_root() {
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].session_id, s1);
     assert_eq!(infos[0].workspace_root.as_deref(), Some("/repo/a"));
+}
+
+#[tokio::test]
+async fn session_list_hides_empty_runs() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let mgr = SessionManager::new(store.clone());
+
+    let empty_session = mgr.new_session();
+    let visible_session = mgr.new_session();
+
+    let mut empty = state(empty_session);
+    empty.step = Step::Done {
+        final_text: "empty final text should not make a session visible".into(),
+    };
+    empty.updated_ms = 300;
+    store.save_delta(&empty, &[]).await.unwrap();
+
+    let mut visible = state(visible_session);
+    add_user_message(&mut visible, "real prompt");
+    visible.step = Step::Failed {
+        reason: "provider failed after user message".into(),
+    };
+    visible.updated_ms = 200;
+    store.save_delta(&visible, &[]).await.unwrap();
+
+    let infos = mgr.list_sessions(None).await.unwrap();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].session_id, visible_session);
+    assert_eq!(infos[0].title.as_deref(), Some("real prompt"));
+}
+
+#[tokio::test]
+async fn session_continue_skips_empty_latest_run() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let mgr = SessionManager::new(store.clone());
+    let sid = mgr.new_session();
+
+    let mut visible = state(sid);
+    add_user_message(&mut visible, "real prompt");
+    visible.step = Step::Done {
+        final_text: "ok".into(),
+    };
+    visible.updated_ms = 100;
+    store.save_delta(&visible, &[]).await.unwrap();
+
+    let mut empty = state(sid);
+    empty.step = Step::Done {
+        final_text: "empty".into(),
+    };
+    empty.updated_ms = 200;
+    store.save_delta(&empty, &[]).await.unwrap();
+
+    let next = mgr.continue_session(sid, 300).await.unwrap();
+    assert_eq!(next.parent_run_id, Some(visible.run_id));
+    assert_eq!(next.history.len(), 1);
 }
 
 #[tokio::test]
@@ -287,6 +354,7 @@ async fn session_list_limit_applies_after_session_aggregation() {
 
     for updated_ms in [300, 200] {
         let mut r = state(s1);
+        add_user_message(&mut r, "x");
         r.step = Step::Done {
             final_text: "x".into(),
         };
@@ -295,6 +363,7 @@ async fn session_list_limit_applies_after_session_aggregation() {
     }
 
     let mut r2 = state(s2);
+    add_user_message(&mut r2, "y");
     r2.step = Step::Done {
         final_text: "y".into(),
     };
@@ -302,6 +371,7 @@ async fn session_list_limit_applies_after_session_aggregation() {
     store.save_delta(&r2, &[]).await.unwrap();
 
     let mut r3 = state(s3);
+    add_user_message(&mut r3, "z");
     r3.step = Step::Done {
         final_text: "z".into(),
     };

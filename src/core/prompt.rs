@@ -11,6 +11,12 @@
 //! This way time/battery/etc. changing per turn don't blow the prefix cache.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::core::clock::utc_date_string;
+use crate::core::model::LlmCaps;
+use crate::core::provider::ActiveToolSet;
+use crate::core::tool::ToolDescriptor;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -202,7 +208,7 @@ impl RuntimeFacts {
         if self.now_ms > 0 {
             out.push_str(&format!(
                 "current_date_utc: {}\n",
-                utc_date_from_unix_ms(self.now_ms)
+                utc_date_string(self.now_ms)
             ));
         }
         for (k, v) in &self.extra {
@@ -217,26 +223,146 @@ impl RuntimeFacts {
     }
 }
 
-fn utc_date_from_unix_ms(ms: i64) -> String {
-    let days = ms.div_euclid(86_400_000);
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02}")
+// ---------- Request-time prompt assembly helpers ----------
+//
+// These are pure functions that Runner uses every model turn to compose the
+// final cacheable prefix, runtime context, and tool descriptors. Living
+// here (not in `runner`) keeps the FSM file focused on state transitions.
+
+/// Extract `PromptBlock`s contributed by an `ActiveToolSet`. Falls back to
+/// a single session-sticky block built from the legacy `prompt_augmentation`
+/// field when no structured blocks are provided.
+pub fn blocks_from_active_set(ats: &ActiveToolSet) -> Vec<PromptBlock> {
+    if !ats.prompt_blocks.is_empty() {
+        return ats.prompt_blocks.clone();
+    }
+    if ats.prompt_augmentation.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![PromptBlock::session_sticky(
+            "active_tool_set.prompt_augmentation",
+            ats.prompt_augmentation.clone(),
+        )]
+    }
 }
 
-// Howard Hinnant's civil calendar conversion, adapted for days since Unix
-// epoch. This avoids pulling a time crate into core for one stable date line.
-fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    y += if m <= 2 { 1 } else { 0 };
-    (y as i32, m as u32, d as u32)
+/// Generate a "## Model capability guidance" section that tells the model
+/// how vision / file-reading interact for the active tool set. Output is
+/// stable for a given (caps, tool-name set), so it stays inside the
+/// cacheable prefix.
+pub fn capability_hint(caps: &LlmCaps, tools: &[ToolDescriptor]) -> String {
+    let has_fs_read = has_tool(tools, "fs_read");
+    let has_fs_stat = has_tool(tools, "fs_stat");
+    let has_sh_exec = has_tool(tools, "sh_exec");
+
+    let mut out = String::from("## Model capability guidance\n");
+    if caps.vision {
+        out.push_str(
+            "- This model supports image inputs. If visual content matters, inspect the image instead of guessing from filenames, MIME types, or surrounding text.\n",
+        );
+        if has_fs_read {
+            out.push_str(
+                "- `fs_read` can return supported PNG/JPEG/GIF/WebP files as image attachments visible to this model. Use it when screenshots, photos, diagrams, UI states, charts, or OCR-relevant images are material; leave `force_text=false` for visual inspection.\n",
+            );
+        } else {
+            out.push_str(
+                "- No local image-reading tool is active. You can still reason about images already attached by the user or returned by other tools.\n",
+            );
+        }
+    } else {
+        out.push_str(
+            "- This model does not support image inputs. Image attachments from tools are omitted before the next model turn.\n",
+        );
+        if has_fs_read {
+            out.push_str(
+                "- Do not use `fs_read` on image files for visual inspection or OCR. It is still valid for text files. For image knowledge, use available text-producing alternatives: ",
+            );
+            let mut alternatives = Vec::new();
+            if has_fs_stat {
+                alternatives.push("`fs_stat` for file metadata");
+            }
+            if has_sh_exec {
+                alternatives.push("`sh_exec` with available OCR or image-processing commands");
+            }
+            alternatives.push("a user-provided description");
+            out.push_str(&alternatives.join(", "));
+            out.push_str(".\n");
+        } else {
+            out.push_str(
+                "- Use only available text-producing tools or ask the user for a description when the task depends on image content.\n",
+            );
+        }
+    }
+    out
+}
+
+/// Append a one-shot capability note onto each tool description that needs
+/// one. Currently only `fs_read` cares — vision-capable models can inspect
+/// returned images, vision-less models must not call it on image files.
+pub fn adapt_tool_descriptors(tools: &[ToolDescriptor], caps: &LlmCaps) -> Vec<ToolDescriptor> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut tool = tool.clone();
+            if tool.name == "fs_read" && !tool.description.contains("Model capability note:") {
+                let note = if caps.vision {
+                    "Model capability note: this model supports vision, so supported image attachments returned by `fs_read` are visible on the next model turn. Leave `force_text=false` for visual inspection."
+                } else {
+                    "Model capability note: this model does not support vision. Do not call `fs_read` on image files for visual inspection or OCR; image attachments are omitted before the next model turn. Use text-producing alternatives instead."
+                };
+                tool.description = format!("{}\n\n{note}", tool.description.trim_end());
+            }
+            tool
+        })
+        .collect()
+}
+
+fn has_tool(tools: &[ToolDescriptor], name: &str) -> bool {
+    tools.iter().any(|tool| tool.name == name)
+}
+
+/// Append `section` to `out` with a `\n\n` separator if both sides are
+/// non-empty. No-op when `section` is blank.
+pub fn append_section(out: &mut String, section: &str) {
+    let section = section.trim();
+    if section.is_empty() {
+        return;
+    }
+    if !out.trim().is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(section);
+}
+
+/// Stable hash of the cacheable prompt prefix + canonical tool schemas.
+/// Used as the `prompt_cache_key` value with `CacheKeyStrategy::PrefixHash`.
+/// The version tag lets us bump the hash deterministically if the input
+/// space ever changes shape.
+pub fn cache_fingerprint(cacheable_prefix: &str, tools: &[ToolDescriptor]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"muagent-prompt-v2\0");
+    h.update(cacheable_prefix.as_bytes());
+
+    let mut ordered_tools: Vec<&ToolDescriptor> = tools.iter().collect();
+    ordered_tools.sort_by(|a, b| a.name.cmp(&b.name));
+    for tool in ordered_tools {
+        h.update(b"\0tool\0");
+        match serde_json::to_string(tool) {
+            Ok(s) => h.update(s.as_bytes()),
+            Err(_) => {
+                h.update(tool.name.as_bytes());
+                h.update(b"\0");
+                h.update(tool.description.as_bytes());
+            }
+        }
+    }
+
+    let bytes = h.finalize();
+    let mut out = String::with_capacity(16);
+    for b in &bytes[..8] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    format!("muagent-{out}")
 }
 
 #[cfg(test)]

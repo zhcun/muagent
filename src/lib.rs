@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod agent_instructions;
 pub mod capabilities;
 pub mod cli;
+pub mod cli_app;
 pub mod config;
 pub mod core;
 pub mod oauth;
@@ -10,6 +11,7 @@ pub mod runtime;
 pub mod sessions;
 pub mod setup;
 pub mod storage;
+#[cfg(feature = "tui")]
 pub mod tui;
 
 pub mod prelude {

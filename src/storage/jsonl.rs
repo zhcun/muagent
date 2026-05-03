@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::core::clock::{Clock, SystemClock};
 use crate::core::error::StoreError;
 use crate::core::event::{Event, EventSeq, RunId, SessionId};
 use crate::core::prelude::{RunFilter, RunHeader, RunStatus};
@@ -118,7 +119,8 @@ impl SessionStore for JsonlSessionStore {
 
         let mut state_for_store = state.clone();
         state_for_store.ensure_history_ids();
-        state_for_store.retain_active_compaction_checkpoints();
+        // Compaction-checkpoint retention is the wired Compactor's job; by
+        // the time we get here, Runner::commit has already invoked it.
         state_for_store
             .validate_history_identity()
             .map_err(|e| StoreError::Corrupt(format!("history identity invariant failed: {e}")))?;
@@ -408,10 +410,7 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    SystemClock.now_ms()
 }
 
 fn io_err(e: std::io::Error) -> StoreError {
