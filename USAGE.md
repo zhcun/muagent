@@ -33,19 +33,6 @@ sudo install -m 755 "$tmp"/muagent-*-"${target}"/muagent /usr/local/bin/muagent
 muagent --help
 ```
 
-For Windows PowerShell:
-
-```powershell
-$tmp = New-Item -ItemType Directory -Force -Path "$env:TEMP\muagent-install"
-gh release download --repo zhcun/muagent --pattern "muagent-*-x86_64-pc-windows-msvc.zip" --dir $tmp
-$zip = Get-ChildItem $tmp -Filter "muagent-*-x86_64-pc-windows-msvc.zip" | Select-Object -First 1
-Expand-Archive -Force $zip.FullName $tmp
-$bin = Get-ChildItem $tmp -Recurse -Filter muagent.exe | Select-Object -First 1
-& $bin.FullName --help
-```
-
-Move the extracted directory somewhere stable and add it to `PATH`.
-
 ### Source Install
 
 Install Rust first if needed:

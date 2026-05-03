@@ -38,9 +38,6 @@ sudo install -m 755 "$tmp"/muagent-*-"${target}"/muagent /usr/local/bin/muagent
 muagent --help
 ```
 
-For Windows, download `muagent-*-x86_64-pc-windows-msvc.zip` from the latest
-GitHub Release and add the extracted directory to `PATH`.
-
 The npm package is not published to the npm registry. For local development
 from a checkout, install the source-built npm shim:
 

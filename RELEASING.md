@@ -12,14 +12,13 @@ The release workflow builds the `muagent` Rust CLI and uploads native packages:
 | macOS Apple Silicon | `muagent-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | `muagent-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
 | Linux x64 static musl | `muagent-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` |
-| Windows x64 | `muagent-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
 
 GitHub automatically attaches source archives for the tag, so source files do
 not need to be uploaded manually.
 
 The packaged files include:
 
-- `muagent` or `muagent.exe`
+- `muagent`
 - `README.md`
 - `USAGE.md`
 - `CONFIG.md`

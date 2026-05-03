@@ -35,9 +35,6 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
 
     steps:
       - name: Checkout tag
@@ -63,20 +60,11 @@ jobs:
         run: cargo build --locked --profile min --bin muagent --target ${{ matrix.target }}
 
       - name: Smoke test binary
-        if: runner.os != 'Windows'
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/min/muagent"
           "$bin" --version
           "$bin" --help >/dev/null
-
-      - name: Smoke test binary
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $bin = "target\${{ matrix.target }}\min\muagent.exe"
-          & $bin --version
-          & $bin --help | Out-Null
 
       - name: Package tarball
         if: matrix.archive == 'tar.gz'
@@ -87,17 +75,6 @@ jobs:
           cp "target/${{ matrix.target }}/min/muagent" "dist/${asset}/"
           cp README.md USAGE.md CONFIG.md BUILD.md DEVELOPMENT.md RELEASING.md LICENSE-* "dist/${asset}/"
           tar -czf "dist/${asset}.tar.gz" -C dist "${asset}"
-
-      - name: Package zip
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $asset = "muagent-$env:RELEASE_TAG-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force -Path "dist\$asset" | Out-Null
-          Copy-Item "target\${{ matrix.target }}\min\muagent.exe" "dist\$asset\"
-          Copy-Item README.md, USAGE.md, CONFIG.md, BUILD.md, DEVELOPMENT.md, RELEASING.md "dist\$asset\"
-          Copy-Item LICENSE-* "dist\$asset\"
-          Compress-Archive -Path "dist\$asset\*" -DestinationPath "dist\$asset.zip" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
