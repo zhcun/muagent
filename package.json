@@ -4,6 +4,10 @@
   "private": true,
   "description": "Local npm wrapper for the muagent Rust CLI.",
   "license": "Apache-2.0 OR MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhcun/muagent.git"
+  },
   "type": "module",
   "bin": {
     "muagent": "bin/muagent.js"
@@ -22,7 +26,10 @@
     "USAGE.md",
     "CONFIG.md",
     "DEVELOPMENT.md",
-    "BUILD.md"
+    "BUILD.md",
+    "RELEASING.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
   ],
   "engines": {
     "node": ">=16"

@@ -13,22 +13,36 @@ usage, configuration, build, and development references.
 
 Requirements:
 
-- Rust/Cargo 1.75+
+- GitHub CLI authenticated with access to `zhcun/muagent`, for the recommended
+  GitHub Release install path
 - Credentials for at least one model provider, such as `OPENROUTER_API_KEY` or
   `OPENAI_API_KEY`
-- Node.js 16+ is only needed if you install through the `npm install -g .`
-  shim; the `cargo install` path below has no Node dependency
+- Rust/Cargo 1.75+ is only needed for source installs or local development
+- Node.js 16+ is only needed if you install through the local `npm install -g .`
+  shim
 
-Install Rust first if it is not already available:
+Install the latest internal release on macOS or Linux:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-cargo --version
-rustc --version
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) target="aarch64-apple-darwin" ;;
+  Darwin-x86_64) target="x86_64-apple-darwin" ;;
+  Linux-x86_64) target="x86_64-unknown-linux-musl" ;;
+  *) echo "unsupported platform"; exit 1 ;;
+esac
+
+tmp="$(mktemp -d)"
+gh release download --repo zhcun/muagent --pattern "muagent-*-${target}.tar.gz" --dir "$tmp"
+tar -xzf "$tmp"/muagent-*-"${target}".tar.gz -C "$tmp"
+sudo install -m 755 "$tmp"/muagent-*-"${target}"/muagent /usr/local/bin/muagent
+muagent --help
 ```
 
-Install the CLI from this checkout:
+For Windows, download `muagent-*-x86_64-pc-windows-msvc.zip` from the latest
+GitHub Release and add the extracted directory to `PATH`.
+
+The npm package is not published to the npm registry. For local development
+from a checkout, install the source-built npm shim:
 
 ```bash
 git clone <repo-url>
@@ -37,9 +51,8 @@ npm install -g .
 muagent --help
 ```
 
-`npm install -g .` performs a local install. It does not require publishing to
-the npm registry; the package install step builds the native Rust `muagent`
-binary with Cargo. You can also install directly with Cargo:
+`npm install -g .` builds the native Rust `muagent` binary with Cargo on the
+installing machine. You can also install directly with Cargo:
 
 ```bash
 cargo install --path . --bin muagent --force
@@ -142,7 +155,8 @@ muagent/
 ├── CONFIG.md            # configuration reference
 ├── USAGE.md             # CLI and runtime usage
 ├── DEVELOPMENT.md       # local development notes
-└── BUILD.md             # cross-platform build and deployment
+├── BUILD.md             # cross-platform build and deployment
+└── RELEASING.md         # internal GitHub Release process
 ```
 
 ## Documentation
@@ -155,3 +169,4 @@ muagent/
   benchmarks, and source layout
 - [BUILD.md](BUILD.md): cross-compilation, Raspberry Pi/Linux targets, and
   deployment checks
+- [RELEASING.md](RELEASING.md): internal GitHub Release process and assets

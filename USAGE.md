@@ -9,8 +9,44 @@ development commands.
 
 Requirements:
 
-- Rust/Cargo 1.75+
-- Node.js 16+, only if you use the `npm install -g .` shim below
+- GitHub CLI authenticated with access to `zhcun/muagent`, for the recommended
+  GitHub Release install path
+- Rust/Cargo 1.75+, only for source installs or local development
+- Node.js 16+, only if you use the local `npm install -g .` shim below
+
+### Recommended: GitHub Release
+
+Install the latest internal release on macOS or Linux:
+
+```bash
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) target="aarch64-apple-darwin" ;;
+  Darwin-x86_64) target="x86_64-apple-darwin" ;;
+  Linux-x86_64) target="x86_64-unknown-linux-musl" ;;
+  *) echo "unsupported platform"; exit 1 ;;
+esac
+
+tmp="$(mktemp -d)"
+gh release download --repo zhcun/muagent --pattern "muagent-*-${target}.tar.gz" --dir "$tmp"
+tar -xzf "$tmp"/muagent-*-"${target}".tar.gz -C "$tmp"
+sudo install -m 755 "$tmp"/muagent-*-"${target}"/muagent /usr/local/bin/muagent
+muagent --help
+```
+
+For Windows PowerShell:
+
+```powershell
+$tmp = New-Item -ItemType Directory -Force -Path "$env:TEMP\muagent-install"
+gh release download --repo zhcun/muagent --pattern "muagent-*-x86_64-pc-windows-msvc.zip" --dir $tmp
+$zip = Get-ChildItem $tmp -Filter "muagent-*-x86_64-pc-windows-msvc.zip" | Select-Object -First 1
+Expand-Archive -Force $zip.FullName $tmp
+$bin = Get-ChildItem $tmp -Recurse -Filter muagent.exe | Select-Object -First 1
+& $bin.FullName --help
+```
+
+Move the extracted directory somewhere stable and add it to `PATH`.
+
+### Source Install
 
 Install Rust first if needed:
 
@@ -28,10 +64,10 @@ npm install -g .
 muagent --help
 ```
 
-This is a local npm install. It does not require publishing the package. The
-install script builds the Rust CLI and places the `muagent` shim in npm's global
-binary directory, for example `/opt/homebrew/bin/muagent` with a common
-Homebrew Node setup.
+This is a local npm install. It does not require publishing the package to the
+npm registry. The install script builds the Rust CLI and places the `muagent`
+shim in npm's global binary directory, for example `/opt/homebrew/bin/muagent`
+with a common Homebrew Node setup.
 
 To test a package artifact without publishing:
 

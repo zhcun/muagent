@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          - os: macos-15
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install Linux musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        run: cargo build --locked --profile min --bin muagent --target ${{ matrix.target }}
+
+      - name: Smoke test binary
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/min/muagent"
+          "$bin" --version
+          "$bin" --help >/dev/null
+
+      - name: Smoke test binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "target\${{ matrix.target }}\min\muagent.exe"
+          & $bin --version
+          & $bin --help | Out-Null
+
+      - name: Package tarball
+        if: matrix.archive == 'tar.gz'
+        run: |
+          set -euo pipefail
+          asset="muagent-${RELEASE_TAG}-${{ matrix.target }}"
+          mkdir -p "dist/${asset}"
+          cp "target/${{ matrix.target }}/min/muagent" "dist/${asset}/"
+          cp README.md USAGE.md CONFIG.md BUILD.md DEVELOPMENT.md RELEASING.md LICENSE-* "dist/${asset}/"
+          tar -czf "dist/${asset}.tar.gz" -C dist "${asset}"
+
+      - name: Package zip
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $asset = "muagent-$env:RELEASE_TAG-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist\$asset" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\min\muagent.exe" "dist\$asset\"
+          Copy-Item README.md, USAGE.md, CONFIG.md, BUILD.md, DEVELOPMENT.md, RELEASING.md "dist\$asset\"
+          Copy-Item LICENSE-* "dist\$asset\"
+          Compress-Archive -Path "dist\$asset\*" -DestinationPath "dist\$asset.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: muagent-${{ env.RELEASE_TAG }}-${{ matrix.target }}
+          path: dist/muagent-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          ls -lh dist
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$tag" \
+              --generate-notes
+          fi
