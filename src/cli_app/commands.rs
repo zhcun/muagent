@@ -84,16 +84,18 @@ pub async fn handle<S: CommandSink>(
                     Ok(()) => {
                         sink.on_runtime_switched(runtime);
                         sink.status(format!(
-                            "model switched: provider={:?} model={}",
-                            runtime.cfg.model.provider, runtime.cfg.model.model
+                            "model switched: provider={} model={}",
+                            runtime.cfg.model.provider.cli_name(),
+                            runtime.cfg.model.model
                         ));
                     }
                     Err(e) => sink.error(format!("model switch failed: {e}")),
                 }
             } else {
                 sink.info(format!(
-                    "provider={:?} model={}",
-                    runtime.cfg.model.provider, runtime.cfg.model.model
+                    "provider={} model={}",
+                    runtime.cfg.model.provider.cli_name(),
+                    runtime.cfg.model.model
                 ));
             }
             CmdAction::Continue
@@ -116,16 +118,18 @@ pub async fn handle<S: CommandSink>(
                     Ok(()) => {
                         sink.on_runtime_switched(runtime);
                         sink.status(format!(
-                            "provider switched: provider={:?} model={}",
-                            runtime.cfg.model.provider, runtime.cfg.model.model
+                            "provider switched: provider={} model={}",
+                            runtime.cfg.model.provider.cli_name(),
+                            runtime.cfg.model.model
                         ));
                     }
                     Err(e) => sink.error(format!("provider switch failed: {e}")),
                 }
             } else {
                 sink.info(format!(
-                    "provider={:?} model={}",
-                    runtime.cfg.model.provider, runtime.cfg.model.model
+                    "provider={} model={}",
+                    runtime.cfg.model.provider.cli_name(),
+                    runtime.cfg.model.model
                 ));
             }
             CmdAction::Continue
@@ -318,4 +322,3 @@ fn token_summary(state: &RunState) -> String {
         u.cost_usd
     )
 }
-

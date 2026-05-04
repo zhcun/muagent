@@ -22,10 +22,32 @@ use file::{norm_key, FileConfig};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Provider {
     OpenAi,
-    OpenAiCodex,
+    Codex,
     Anthropic,
     Google,
     OpenRouter,
+}
+
+impl Provider {
+    pub fn cli_name(&self) -> &'static str {
+        match self {
+            Provider::OpenAi => "openai",
+            Provider::Codex => "codex",
+            Provider::Anthropic => "anthropic",
+            Provider::Google => "google",
+            Provider::OpenRouter => "openrouter",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Provider::OpenAi => "OpenAI",
+            Provider::Codex => "Codex",
+            Provider::Anthropic => "Anthropic",
+            Provider::Google => "Google",
+            Provider::OpenRouter => "OpenRouter",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -614,7 +636,7 @@ pub fn parse_list_arg(raw: &str) -> Vec<String> {
 fn parse_provider(raw: &str) -> Result<Provider, String> {
     match raw.to_lowercase().as_str() {
         "openai" => Ok(Provider::OpenAi),
-        "openai-codex" | "openai_codex" | "codex" | "chatgpt" => Ok(Provider::OpenAiCodex),
+        "openai-codex" | "openai_codex" | "codex" | "chatgpt" => Ok(Provider::Codex),
         "anthropic" | "claude" => Ok(Provider::Anthropic),
         "google" | "gemini" => Ok(Provider::Google),
         "openrouter" => Ok(Provider::OpenRouter),
@@ -625,7 +647,7 @@ fn parse_provider(raw: &str) -> Result<Provider, String> {
 fn default_base_url(provider: &Provider) -> &'static str {
     match provider {
         Provider::OpenAi => "https://api.openai.com/v1",
-        Provider::OpenAiCodex => "https://chatgpt.com/backend-api",
+        Provider::Codex => "https://chatgpt.com/backend-api",
         Provider::Anthropic => "https://api.anthropic.com",
         Provider::Google => "https://generativelanguage.googleapis.com",
         Provider::OpenRouter => "https://openrouter.ai/api/v1",
@@ -635,7 +657,7 @@ fn default_base_url(provider: &Provider) -> &'static str {
 fn default_key_env(provider: &Provider) -> &'static str {
     match provider {
         Provider::OpenAi => "OPENAI_API_KEY",
-        Provider::OpenAiCodex => "OPENAI_CODEX_ACCESS_TOKEN",
+        Provider::Codex => "OPENAI_CODEX_ACCESS_TOKEN",
         Provider::Anthropic => "ANTHROPIC_API_KEY",
         Provider::Google => "GEMINI_API_KEY",
         Provider::OpenRouter => "OPENROUTER_API_KEY",
@@ -645,20 +667,20 @@ fn default_key_env(provider: &Provider) -> &'static str {
 fn default_model(provider: &Provider) -> &'static str {
     match provider {
         Provider::OpenAi => "gpt-5.4-nano",
-        Provider::OpenAiCodex => "gpt-5.5",
+        Provider::Codex => "gpt-5.5",
         Provider::Anthropic => "claude-haiku-4-5",
         Provider::Google => "gemini-3.1-flash-lite-preview",
         Provider::OpenRouter => "openai/gpt-5.4-nano",
     }
 }
 
-fn provider_id(provider: &Provider) -> &'static str {
+fn provider_config_ids(provider: &Provider) -> &'static [&'static str] {
     match provider {
-        Provider::OpenAi => "openai",
-        Provider::OpenAiCodex => "openai_codex",
-        Provider::Anthropic => "anthropic",
-        Provider::Google => "google",
-        Provider::OpenRouter => "openrouter",
+        Provider::OpenAi => &["openai"],
+        Provider::Codex => &["codex", "openai_codex"],
+        Provider::Anthropic => &["anthropic"],
+        Provider::Google => &["google"],
+        Provider::OpenRouter => &["openrouter"],
     }
 }
 
@@ -666,8 +688,8 @@ fn provider_env_name(provider: &Provider, suffix: &str) -> Option<String> {
     match (provider, suffix) {
         (Provider::OpenAi, "MODEL") => Some("OPENAI_MODEL".into()),
         (Provider::OpenAi, "BASE_URL") => Some("OPENAI_BASE_URL".into()),
-        (Provider::OpenAiCodex, "MODEL") => Some("OPENAI_CODEX_MODEL".into()),
-        (Provider::OpenAiCodex, "BASE_URL") => Some("OPENAI_CODEX_BASE_URL".into()),
+        (Provider::Codex, "MODEL") => Some("OPENAI_CODEX_MODEL".into()),
+        (Provider::Codex, "BASE_URL") => Some("OPENAI_CODEX_BASE_URL".into()),
         (Provider::Anthropic, "MODEL") => Some("ANTHROPIC_MODEL".into()),
         (Provider::Anthropic, "BASE_URL") => Some("ANTHROPIC_BASE_URL".into()),
         (Provider::Google, "MODEL") => Some("GEMINI_MODEL".into()),
@@ -684,14 +706,15 @@ fn scoped_model_field(
     default_provider: &Provider,
     field: &str,
 ) -> Option<String> {
-    let id = provider_id(provider);
     let mut keys = Vec::new();
     if provider == default_provider {
         keys.push(format!("model.{field}"));
         keys.push(field.to_string());
     }
-    keys.push(format!("providers.{id}.{field}"));
-    keys.push(format!("{id}.{field}"));
+    for id in provider_config_ids(provider) {
+        keys.push(format!("providers.{id}.{field}"));
+        keys.push(format!("{id}.{field}"));
+    }
     file_cfg.string_owned(&keys)
 }
 
@@ -702,18 +725,19 @@ fn scoped_cap_field(
     model: &str,
     fields: &[&str],
 ) -> Option<String> {
-    let id = provider_id(provider);
     let model_id = norm_key(model);
     let mut keys = Vec::new();
-    for field in fields {
-        keys.push(format!(
-            "providers.{id}.models.{model_id}.capabilities.{field}"
-        ));
-        keys.push(format!("providers.{id}.models.{model_id}.caps.{field}"));
-        keys.push(format!("providers.{id}.models.{model_id}.{field}"));
-        keys.push(format!("{id}.models.{model_id}.capabilities.{field}"));
-        keys.push(format!("{id}.models.{model_id}.caps.{field}"));
-        keys.push(format!("{id}.models.{model_id}.{field}"));
+    for id in provider_config_ids(provider) {
+        for field in fields {
+            keys.push(format!(
+                "providers.{id}.models.{model_id}.capabilities.{field}"
+            ));
+            keys.push(format!("providers.{id}.models.{model_id}.caps.{field}"));
+            keys.push(format!("providers.{id}.models.{model_id}.{field}"));
+            keys.push(format!("{id}.models.{model_id}.capabilities.{field}"));
+            keys.push(format!("{id}.models.{model_id}.caps.{field}"));
+            keys.push(format!("{id}.models.{model_id}.{field}"));
+        }
     }
     if provider == default_provider {
         for field in fields {
@@ -721,11 +745,13 @@ fn scoped_cap_field(
             keys.push(format!("model.caps.{field}"));
         }
     }
-    for field in fields {
-        keys.push(format!("providers.{id}.capabilities.{field}"));
-        keys.push(format!("providers.{id}.caps.{field}"));
-        keys.push(format!("{id}.capabilities.{field}"));
-        keys.push(format!("{id}.caps.{field}"));
+    for id in provider_config_ids(provider) {
+        for field in fields {
+            keys.push(format!("providers.{id}.capabilities.{field}"));
+            keys.push(format!("providers.{id}.caps.{field}"));
+            keys.push(format!("{id}.capabilities.{field}"));
+            keys.push(format!("{id}.caps.{field}"));
+        }
     }
     file_cfg.string_owned(&keys)
 }
@@ -1071,20 +1097,59 @@ mod tests {
     }
 
     #[test]
-    fn openai_codex_provider_uses_subscription_defaults() {
+    fn codex_provider_uses_subscription_defaults() {
         let file_cfg = parse_config_text(
             r#"
             [model]
-            provider = "openai-codex"
+            provider = "codex"
 
             "#,
         )
         .unwrap();
         let model =
             super::ModelConfig::from_sources(&file_cfg, &ConfigOverrides::default()).unwrap();
-        assert_eq!(model.provider, Provider::OpenAiCodex);
+        assert_eq!(model.provider, Provider::Codex);
         assert_eq!(model.base_url, "https://chatgpt.com/backend-api");
         assert_eq!(model.model, "gpt-5.5");
+    }
+
+    #[test]
+    fn codex_provider_reads_canonical_table_before_legacy_alias() {
+        let file_cfg = parse_config_text(
+            r#"
+            [model]
+            provider = "codex"
+
+            [providers.codex]
+            model = "gpt-5.5"
+
+            [providers.openai_codex]
+            model = "legacy-model"
+            "#,
+        )
+        .unwrap();
+        let model =
+            super::ModelConfig::from_sources(&file_cfg, &ConfigOverrides::default()).unwrap();
+        assert_eq!(model.provider, Provider::Codex);
+        assert_eq!(model.model, "gpt-5.5");
+    }
+
+    #[test]
+    fn codex_provider_still_reads_legacy_table() {
+        let file_cfg = parse_config_text(
+            r#"
+            [model]
+            provider = "codex"
+
+            [providers.openai_codex]
+            model = "legacy-model"
+            "#,
+        )
+        .unwrap();
+        let model =
+            super::ModelConfig::from_sources(&file_cfg, &ConfigOverrides::default()).unwrap();
+        assert_eq!(model.provider, Provider::Codex);
+        assert_eq!(model.model, "legacy-model");
     }
 
     #[test]

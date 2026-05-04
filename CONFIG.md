@@ -114,13 +114,13 @@ model = "gpt-5.4-nano"
 api_key_env = "OPENAI_API_KEY"
 ```
 
-OpenAI Codex / ChatGPT OAuth as the default provider:
+Codex OAuth as the default provider:
 
 ```toml
 [model]
-provider = "openai-codex"
+provider = "codex"
 
-[providers.openai_codex]
+[providers.codex]
 model = "gpt-5.5"
 # base_url defaults to https://chatgpt.com/backend-api
 ```
@@ -130,9 +130,9 @@ token overrides are supported, but login files provide better refresh behavior:
 
 ```toml
 [model]
-provider = "openai-codex"
+provider = "codex"
 
-[providers.openai_codex]
+[providers.codex]
 model = "gpt-5.5"
 api_key_env = "OPENAI_CODEX_ACCESS_TOKEN"
 ```
@@ -145,7 +145,7 @@ export OPENAI_CODEX_ACCOUNT_ID=...
 ## Multiple Providers
 
 This config uses OpenRouter by default and allows temporary switches with
-`--provider openai` or `--provider openai-codex`:
+`--provider openai` or `--provider codex`:
 
 ```toml
 [model]
@@ -162,7 +162,7 @@ vision = false
 model = "gpt-5.4-nano"
 api_key_env = "OPENAI_API_KEY"
 
-[providers.openai_codex]
+[providers.codex]
 model = "gpt-5.5"
 
 [providers.anthropic]
@@ -177,7 +177,7 @@ api_key_env = "GEMINI_API_KEY"
 ```bash
 muagent "Use the default OpenRouter profile."
 muagent --provider openai "Use OpenAI for this run."
-muagent --provider openai-codex "Use ChatGPT/Codex OAuth for this run."
+muagent --provider codex "Use Codex OAuth for this run."
 ```
 
 ## Complete Example
@@ -194,7 +194,7 @@ api_key_env = "OPENROUTER_API_KEY"
 model = "gpt-5.4-nano"
 api_key_env = "OPENAI_API_KEY"
 
-[providers.openai_codex]
+[providers.codex]
 model = "gpt-5.5"
 
 [providers.anthropic]
@@ -370,14 +370,14 @@ Provider IDs:
 | Provider | Config value | Table | Default model | Default base URL | Default key env |
 |---|---|---|---|---|---|
 | OpenAI | `openai` | `[providers.openai]` | `gpt-5.4-nano` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
-| OpenAI Codex | `openai-codex`, `openai_codex`, `codex`, `chatgpt` | `[providers.openai_codex]` | `gpt-5.5` | `https://chatgpt.com/backend-api` | `OPENAI_CODEX_ACCESS_TOKEN` |
+| Codex | `codex` (`openai-codex`, `openai_codex`, and `chatgpt` are aliases) | `[providers.codex]` | `gpt-5.5` | `https://chatgpt.com/backend-api` | `OPENAI_CODEX_ACCESS_TOKEN` |
 | Anthropic | `anthropic`, `claude` | `[providers.anthropic]` | `claude-haiku-4-5` | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | Google | `google`, `gemini` | `[providers.google]` | `gemini-3.1-flash-lite-preview` | `https://generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
 | OpenRouter | `openrouter` | `[providers.openrouter]` | `openai/gpt-5.4-nano` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 
-## OpenAI Codex OAuth
+## Codex OAuth
 
-`openai-codex` is not a standard OpenAI API-key provider. It calls the ChatGPT
+`codex` is not a standard OpenAI API-key provider. It calls the ChatGPT
 backend `/codex/responses` endpoint with an OAuth access token.
 
 Credential lookup order:
@@ -404,7 +404,7 @@ written back to the same file when possible. Recommended flow:
 
 ```bash
 codex login
-muagent --provider openai-codex "Run one task with ChatGPT/Codex OAuth."
+muagent --provider codex "Run one task with Codex OAuth."
 ```
 
 ## Files And Shell
@@ -578,8 +578,8 @@ workspace ancestors and the user config directory.
 | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_BASE_URL` | OpenRouter |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL` | Anthropic |
 | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_BASE_URL` | Google |
-| `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_ACCOUNT_ID`, `OPENAI_CODEX_MODEL`, `OPENAI_CODEX_BASE_URL` | OpenAI Codex |
-| `MUAGENT_CODEX_ACCESS_TOKEN`, `MUAGENT_CODEX_ACCOUNT_ID`, `MUAGENT_CODEX_REFRESH_TOKEN` | OpenAI Codex override |
+| `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_ACCOUNT_ID`, `OPENAI_CODEX_MODEL`, `OPENAI_CODEX_BASE_URL` | Codex |
+| `MUAGENT_CODEX_ACCESS_TOKEN`, `MUAGENT_CODEX_ACCOUNT_ID`, `MUAGENT_CODEX_REFRESH_TOKEN` | Codex override |
 | `MUAGENT_STORE` | Session store |
 | `MUAGENT_ROOT` | File-tool root |
 | `MUAGENT_TOOLS`, `MUAGENT_DISABLE_TOOLS` | Tool allowlist and denylist |
@@ -616,8 +616,8 @@ muagent --config-file ~/.muagent/config.toml exec "hello"
 
 Common failures:
 
-- `unknown provider`: use one of `openai`, `openai-codex`, `anthropic`,
-  `google`, or `openrouter`.
+- `unknown provider`: use one of `openrouter`, `openai`, `codex`,
+  `anthropic`, or `google`.
 - `config file not found`: `--config-file` and `MUAGENT_CONFIG` require the
   file to exist.
 - `invalid runtime.cache`: use supported boolean values such as `true`,
@@ -632,7 +632,7 @@ Common failures:
 ## TOML Parsing Notes
 
 - Keys are lowercased and `-` is normalized to `_`; `openai-codex` and
-  `openai_codex` are equivalent.
+  `openai_codex` remain equivalent legacy names for `codex`.
 - List fields can be TOML arrays. Environment variables and CLI lists are
   comma-separated.
 - Empty arrays are meaningful: `enabled = []` explicitly exposes no entries.

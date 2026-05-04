@@ -7,7 +7,7 @@ adapters, filesystem/shell tools, resumable sessions, long-context
 compaction, skill and MCP loading, image inputs, and terminal-first workflows
 through one-shot `exec` and a full-screen TUI.
 
-It works with OpenRouter, OpenAI, OpenAI Codex OAuth, Anthropic, and Google.
+It works with OpenRouter, OpenAI, Codex OAuth, Anthropic, and Google.
 
 ## Install
 
@@ -75,13 +75,13 @@ model = "gpt-5.4-nano"
 api_key = "sk-..."
 ```
 
-OpenAI Codex OAuth:
+Codex OAuth:
 
 ```toml
 [model]
-provider = "openai-codex"
+provider = "codex"
 
-[providers.openai_codex]
+[providers.codex]
 model = "gpt-5.5"
 ```
 
@@ -100,7 +100,7 @@ muagent
 # Provider and model overrides
 muagent --provider openai exec "List the test entry points."
 muagent --provider openai --model gpt-5.4-nano exec "List the test entry points."
-muagent --provider openai-codex --model gpt-5.5 exec "Review the current diff."
+muagent --provider codex --model gpt-5.5 exec "Review the current diff."
 
 # Alternate config, workspace root, and session store
 muagent --config-file ./config.toml exec "Use this config file only."

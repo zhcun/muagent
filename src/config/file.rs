@@ -205,6 +205,10 @@ fn is_known_config_key(key: &str) -> bool {
             | "openai_codex.base_url"
             | "openai_codex.api_key"
             | "openai_codex.api_key_env"
+            | "codex.model"
+            | "codex.base_url"
+            | "codex.api_key"
+            | "codex.api_key_env"
             | "anthropic.model"
             | "anthropic.base_url"
             | "anthropic.api_key"
@@ -296,7 +300,7 @@ fn is_provider_specific_key(key: &str) -> bool {
     };
     if !matches!(
         provider,
-        "openai" | "openai_codex" | "anthropic" | "google" | "openrouter"
+        "openai" | "openai_codex" | "codex" | "anthropic" | "google" | "openrouter"
     ) {
         return false;
     }
@@ -308,8 +312,9 @@ fn is_provider_specific_key(key: &str) -> bool {
 }
 
 fn is_provider_model_key(key: &str) -> bool {
-    const PROVIDERS: [&str; 5] = [
+    const PROVIDERS: [&str; 6] = [
         "openai",
+        "codex",
         "openai_codex",
         "anthropic",
         "google",

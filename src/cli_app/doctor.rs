@@ -10,8 +10,10 @@ pub fn config_doctor_report(cfg: &Config) -> String {
     let mut lines = vec![
         "Configuration check".to_string(),
         format!(
-            "provider={:?} model={} base_url={}",
-            cfg.model.provider, cfg.model.model, cfg.model.base_url
+            "provider={} model={} base_url={}",
+            cfg.model.provider.cli_name(),
+            cfg.model.model,
+            cfg.model.base_url
         ),
         format!("store={} root={}", store_label(cfg), cfg.fs.root.display()),
     ];
@@ -43,8 +45,8 @@ pub fn model_setup_hints(cfg: &Config) -> Vec<String> {
             "OpenAI is selected but no key is configured. Set OPENAI_API_KEY, or point base_url at a local OpenAI-compatible server. Current base_url: {}.",
             cfg.model.base_url
         )],
-        Provider::OpenAiCodex if !has_key && !codex_oauth_available() => vec![
-            "OpenAI Codex OAuth is selected but no login/token was found. Run `codex login`, or set OPENAI_CODEX_ACCESS_TOKEN plus OPENAI_CODEX_ACCOUNT_ID.".into(),
+        Provider::Codex if !has_key && !codex_oauth_available() => vec![
+            "Codex OAuth is selected but no login/token was found. Run `codex login`, or set OPENAI_CODEX_ACCESS_TOKEN plus OPENAI_CODEX_ACCOUNT_ID.".into(),
         ],
         Provider::Anthropic if !has_key => vec![
             "Anthropic is selected but no key is configured. Set ANTHROPIC_API_KEY or MUAGENT_API_KEY.".into(),

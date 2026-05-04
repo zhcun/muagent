@@ -56,7 +56,7 @@ To test a package artifact without publishing:
 
 ```bash
 npm pack
-npm install -g ./muagent-0.1.0.tgz
+npm install -g ./muagent-0.1.1.tgz
 ```
 
 To run without a global install:
@@ -132,7 +132,7 @@ muagent --provider openai --model gpt-5.4-nano exec "Run the focused tests."
 ```
 
 Create `~/.muagent/config.toml` only when you want durable defaults. Example
-with OpenRouter as the default provider, plus OpenAI and OpenAI Codex profiles
+with OpenRouter as the default provider, plus OpenAI and Codex profiles
 for explicit switching:
 
 ```toml
@@ -147,7 +147,7 @@ api_key_env = "OPENROUTER_API_KEY"
 model = "gpt-5.4-nano"
 api_key_env = "OPENAI_API_KEY"
 
-[providers.openai_codex]
+[providers.codex]
 model = "gpt-5.5"
 # Prefer `codex login`; muagent can reuse ~/.codex/auth.json.
 # For a manual access token, uncomment the next line:
@@ -155,7 +155,7 @@ model = "gpt-5.5"
 ```
 
 See [CONFIG.md](CONFIG.md) for all fields, defaults, environment variables, and
-OpenAI Codex OAuth behavior.
+Codex OAuth behavior.
 
 ## Command Forms
 
@@ -271,7 +271,7 @@ muagent -- "- This prompt starts with a dash."
 | `--tui` | Use the full-screen TUI |
 | `--repl` | Use the line REPL when no one-shot prompt is supplied |
 | `--config-file <FILE>` | Load a specific TOML config file |
-| `--provider <NAME>` | Select `openai`, `openai-codex`, `anthropic`, `google`, or `openrouter` |
+| `--provider <NAME>` | Select `openrouter`, `openai`, `codex`, `anthropic`, or `google` |
 | `-m`, `--model <ID>` | Override the model ID |
 | `--base-url <URL>` | Override the provider base URL |
 | `-i`, `--image <PATHS>` | Attach image files to a one-shot prompt |

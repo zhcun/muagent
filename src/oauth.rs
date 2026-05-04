@@ -1,6 +1,6 @@
 //! OAuth credential helpers for subscription-backed model providers.
 //!
-//! The first consumer is OpenAI Codex/ChatGPT OAuth. It intentionally reads
+//! The first consumer is Codex/ChatGPT OAuth. It intentionally reads
 //! the credential files created by the official Codex CLI and pi-mono so this
 //! project can reuse an existing browser login instead of asking for an API key.
 
@@ -83,7 +83,7 @@ impl OpenAiCodexAuth {
 
         let Some(loaded) = load_openai_codex_auth(self.auth_path.as_deref())? else {
             return Err(ModelError::Auth(
-                "OpenAI Codex OAuth credentials not found. Run `codex login`, pi-mono login, or set OPENAI_CODEX_ACCESS_TOKEN plus OPENAI_CODEX_ACCOUNT_ID.".into(),
+                "Codex OAuth credentials not found. Run `codex login`, pi-mono login, or set OPENAI_CODEX_ACCESS_TOKEN plus OPENAI_CODEX_ACCOUNT_ID.".into(),
             ));
         };
 
@@ -96,7 +96,7 @@ impl OpenAiCodexAuth {
             tracing::warn!(
                 path = %loaded.path.display(),
                 error = %e,
-                "failed to persist refreshed OpenAI Codex OAuth token"
+                "failed to persist refreshed Codex OAuth token"
             );
         }
         Ok(refreshed)
@@ -153,12 +153,12 @@ fn load_openai_codex_auth(
             Ok(text) => text,
             Err(e) if explicit_path.is_some() => {
                 return Err(ModelError::Auth(format!(
-                    "read OpenAI Codex auth {}: {e}",
+                    "read Codex auth {}: {e}",
                     path.display()
                 )));
             }
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to read OpenAI Codex auth file");
+                tracing::warn!(path = %path.display(), error = %e, "failed to read Codex auth file");
                 continue;
             }
         };
@@ -166,12 +166,12 @@ fn load_openai_codex_auth(
             Ok(v) => v,
             Err(e) if explicit_path.is_some() => {
                 return Err(ModelError::Auth(format!(
-                    "parse OpenAI Codex auth {}: {e}",
+                    "parse Codex auth {}: {e}",
                     path.display()
                 )));
             }
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to parse OpenAI Codex auth file");
+                tracing::warn!(path = %path.display(), error = %e, "failed to parse Codex auth file");
                 continue;
             }
         };
@@ -286,7 +286,7 @@ fn complete_account_id(mut token: OpenAiCodexToken) -> Result<OpenAiCodexToken, 
     }
     if token.account_id.trim().is_empty() {
         return Err(ModelError::Auth(
-            "OpenAI Codex OAuth token has no ChatGPT account id; set OPENAI_CODEX_ACCOUNT_ID or refresh login credentials.".into(),
+            "Codex OAuth token has no ChatGPT account id; set OPENAI_CODEX_ACCOUNT_ID or refresh login credentials.".into(),
         ));
     }
     Ok(token)
@@ -313,7 +313,7 @@ async fn refresh_openai_codex_token(
 ) -> Result<OpenAiCodexToken, ModelError> {
     let refresh_token = token.refresh_token.as_deref().ok_or_else(|| {
         ModelError::Auth(
-            "OpenAI Codex OAuth token is expired and no refresh token is available".into(),
+            "Codex OAuth token is expired and no refresh token is available".into(),
         )
     })?;
     let body = form_urlencoded(&[
@@ -343,7 +343,7 @@ async fn refresh_openai_codex_token(
 
     if resp.status != 200 {
         return Err(ModelError::Auth(format!(
-            "OpenAI Codex OAuth refresh failed: status {}: {}",
+            "Codex OAuth refresh failed: status {}: {}",
             resp.status,
             String::from_utf8_lossy(&resp.body)
         )));
@@ -351,7 +351,7 @@ async fn refresh_openai_codex_token(
 
     let parsed: TokenRefreshResponse = serde_json::from_slice(&resp.body).map_err(|e| {
         ModelError::Parse(format!(
-            "parse OpenAI Codex OAuth refresh response: {e}: {}",
+            "parse Codex OAuth refresh response: {e}: {}",
             String::from_utf8_lossy(&resp.body)
         ))
     })?;
@@ -359,7 +359,7 @@ async fn refresh_openai_codex_token(
         .access_token
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| {
-            ModelError::Parse("OpenAI Codex OAuth refresh missing access_token".into())
+            ModelError::Parse("Codex OAuth refresh missing access_token".into())
         })?;
     let refresh_token = parsed
         .refresh_token

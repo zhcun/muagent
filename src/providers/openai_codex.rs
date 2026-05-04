@@ -1,4 +1,4 @@
-//! OpenAI Codex/ChatGPT subscription-backed Responses adapter.
+//! Codex/ChatGPT subscription-backed Responses adapter.
 //!
 //! This is deliberately separate from the normal OpenAI-compatible adapter:
 //! it talks to the ChatGPT backend `/codex/responses` endpoint and authenticates
@@ -673,7 +673,7 @@ fn tool_protocol_error_call(
         format!("codex_tool_protocol_error_{}", index + 1),
         TOOL_PROTOCOL_ERROR_TOOL,
         json!({
-            "provider": "openai-codex",
+            "provider": "codex",
             "call_id": call_id,
             "tool_name": tool_name,
             "message": message,

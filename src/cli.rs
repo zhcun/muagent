@@ -645,7 +645,7 @@ OPTIONS:
       --config-file <FILE>
                           Load this config.toml instead of the default config
                           search path. (env: MUAGENT_CONFIG)
-      --provider <NAME>   Model provider: openai | openai-codex | anthropic | google | openrouter
+      --provider <NAME>   Model provider: openrouter | openai | codex | anthropic | google
                           (default: openrouter; env: MUAGENT_PROVIDER)
   -m, --model <ID>        Model id (env: MUAGENT_MODEL).
       --base-url <URL>    Override API base URL (env: MUAGENT_BASE_URL).
@@ -694,7 +694,7 @@ OPTIONS:
 ENVIRONMENT:
   One of these must be set (depending on --provider):
     OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY
-  For --provider openai-codex, run `codex login` or pi-mono login first;
+  For --provider codex, run `codex login` or pi-mono login first;
   existing ~/.codex/auth.json / ~/.pi/agent/auth.json OAuth credentials are used.
   Or set MUAGENT_API_KEY to override all.
   Agent instruction files are loaded from AGENT.md / AGENTS.md / CLAUDE.md
@@ -892,7 +892,7 @@ mod tests {
         let got = invocation(&[
             "resume",
             "--provider",
-            "openai-codex",
+            "codex",
             "--model",
             "gpt-5.4",
             "--root",
@@ -901,7 +901,7 @@ mod tests {
             "memory",
         ]);
         assert_eq!(got.mode, RunMode::ResumePicker { all: false });
-        assert_eq!(got.config.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(got.config.provider.as_deref(), Some("codex"));
         assert_eq!(got.config.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(got.config.root.as_deref(), Some("/tmp/work"));
         assert_eq!(got.config.store.as_deref(), Some("memory"));
@@ -924,7 +924,7 @@ mod tests {
             "exec",
             "resume",
             "--provider",
-            "openai-codex",
+            "codex",
             "--last",
             "continue",
         ]);
@@ -935,7 +935,7 @@ mod tests {
                 tui: false,
             }
         );
-        assert_eq!(got.config.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(got.config.provider.as_deref(), Some("codex"));
     }
 
     #[test]
@@ -945,7 +945,7 @@ mod tests {
             "resume",
             session_id,
             "--provider",
-            "openai-codex",
+            "codex",
             "--model",
             "gpt-5.4-nano",
             "continue",
@@ -958,7 +958,7 @@ mod tests {
                 tui: false,
             }
         );
-        assert_eq!(got.config.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(got.config.provider.as_deref(), Some("codex"));
         assert_eq!(got.config.model.as_deref(), Some("gpt-5.4-nano"));
     }
 
@@ -970,7 +970,7 @@ mod tests {
             "resume",
             session_id,
             "--provider",
-            "openai-codex",
+            "codex",
             "continue",
         ]);
         assert_eq!(
@@ -981,7 +981,7 @@ mod tests {
                 tui: false,
             }
         );
-        assert_eq!(got.config.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(got.config.provider.as_deref(), Some("codex"));
     }
 
     #[test]

@@ -244,7 +244,7 @@ fn build_model_adapter(
             let caps = apply_caps_overrides(adapter.caps(), &m.capabilities);
             Arc::new(adapter.with_caps(caps))
         }
-        Provider::OpenAiCodex => {
+        Provider::Codex => {
             let adapter = OpenAiCodexAdapter::new(net, &m.base_url, &m.model, m.api_key.clone());
             let caps = apply_caps_overrides(adapter.caps(), &m.capabilities);
             Arc::new(adapter.with_caps(caps))
