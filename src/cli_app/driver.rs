@@ -11,7 +11,7 @@ use crate::cli_app::DEFAULT_MAX_STEPS;
 use crate::core::event::Event;
 use crate::core::run_state::RunState;
 use crate::core::runner::Runner;
-use crate::core::step::Step;
+use crate::core::step::{PauseReason, Step};
 use crate::core::types::{Content, Message};
 
 /// Typed channel update from the inflight runner task. Lets the runner emit
@@ -22,6 +22,10 @@ use crate::core::types::{Content, Message};
 pub enum TuiUpdate {
     Activity(String),
     Assistant(String),
+    /// Prompt tokens reported for the latest model request. This is the
+    /// current context size for that request, unlike `RunState.usage`, which
+    /// accumulates prompt tokens across the whole session.
+    PromptTokens(u32),
     /// Per-step token delta (prompt + completion). The TUI accumulates these
     /// into the in-flight turn counter shown next to the spinner.
     Tokens(u32),
@@ -90,7 +94,7 @@ pub async fn submit_and_drive_with_content_and_updates(
         .submit_user_message(state, Message::User { content })
         .await
         .map_err(|e| format!("submit_user_message failed: {e:?}"))?;
-    send_tui_activity(&updates, "user message submitted");
+    send_tui_activity(&updates, "submitted");
     drive_until_terminal_with_updates(runner, state, updates).await
 }
 
@@ -101,14 +105,11 @@ pub async fn drive_until_terminal_with_updates(
 ) -> Result<(), String> {
     let budget = StepBudget::from_env();
     let mut bad_tool_events = 0usize;
-    for step_idx in 0..budget.max_steps {
+    for _ in 0..budget.max_steps {
         if is_terminal(&state.step) {
             return Ok(());
         }
-        send_tui_activity(
-            &updates,
-            format!("step {}: {}", step_idx + 1, state.step.name()),
-        );
+        send_tui_activity(&updates, step_activity_label(&state.step));
         let prompt_before = state.usage.tokens_prompt;
         let completion_before = state.usage.tokens_completion;
         let out = runner.step(state).await.map_err(|e| {
@@ -129,6 +130,21 @@ pub async fn drive_until_terminal_with_updates(
         "hit step budget without reaching terminal state; step={:?}",
         state.step
     ))
+}
+
+fn step_activity_label(step: &Step) -> &'static str {
+    match step {
+        Step::Ready => "preparing",
+        Step::ModelTurn => "thinking",
+        Step::ToolBatch { .. } => "using tools",
+        Step::ToolIntent { .. } => "checking tool result",
+        Step::Paused {
+            reason: PauseReason::HostRequested,
+        } => "stopped",
+        Step::Paused { .. } => "paused",
+        Step::Done { .. } => "done",
+        Step::Failed { .. } => "failed",
+    }
 }
 
 struct StepBudget {
@@ -171,6 +187,9 @@ fn emit_step_token_delta(
         .usage
         .tokens_completion
         .saturating_sub(completion_before);
+    if prompt_delta > 0 {
+        send_tui_update(updates, TuiUpdate::PromptTokens(prompt_delta));
+    }
     let token_delta = prompt_delta.saturating_add(completion_delta);
     if token_delta > 0 {
         send_tui_update(updates, TuiUpdate::Tokens(token_delta));
@@ -196,8 +215,9 @@ fn process_step_events(
         log_event(ev);
         match ev {
             Event::ToolCallStart { tool, args, .. } => {
+                let display = tool_display_label(tool, args);
                 pending_tool = Some((tool.clone(), args.clone()));
-                send_tui_activity(updates, format!("tool started: {tool}"));
+                send_tui_activity(updates, format!("Running {display}"));
             }
             Event::ToolCallEnd {
                 ok, brief, detail, ..
@@ -242,14 +262,17 @@ fn emit_tool_call_end(
     send_tui_update(
         updates,
         TuiUpdate::Tool {
-            display,
+            display: display.clone(),
             ok,
             brief: brief.to_string(),
             extra,
         },
     );
-    let outcome = if ok { "ok" } else { "failed" };
-    send_tui_activity(updates, format!("tool {outcome}: {}", truncate(brief, 120)));
+    let outcome = if ok { "finished" } else { "failed" };
+    send_tui_activity(
+        updates,
+        format!("Tool {outcome}: {}", truncate(&display, 80)),
+    );
 }
 
 pub fn send_tui_update(updates: &Option<mpsc::UnboundedSender<TuiUpdate>>, update: TuiUpdate) {

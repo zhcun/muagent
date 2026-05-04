@@ -11,11 +11,19 @@ use crate::tui::TuiApp;
 /// Sink that routes command output into the TUI chat panel.
 pub struct TuiAppSink<'a> {
     pub app: &'a mut TuiApp,
+    had_error: bool,
 }
 
 impl<'a> TuiAppSink<'a> {
     pub fn new(app: &'a mut TuiApp) -> Self {
-        Self { app }
+        Self {
+            app,
+            had_error: false,
+        }
+    }
+
+    pub fn had_error(&self) -> bool {
+        self.had_error
     }
 }
 
@@ -24,6 +32,7 @@ impl CommandSink for TuiAppSink<'_> {
         self.app.add_system(msg);
     }
     fn error(&mut self, msg: String) {
+        self.had_error = true;
         self.app.add_error(msg);
     }
     fn status(&mut self, msg: String) {
@@ -39,16 +48,18 @@ impl CommandSink for TuiAppSink<'_> {
         match kind {
             SessionResetKind::New => {
                 self.app.clear_messages();
-                self.app
-                    .add_system(format!("new session {}", next.session_id));
+                self.app.replace_input_history_texts(Vec::<String>::new());
+                self.app.add_activity("New session");
             }
             SessionResetKind::Continued => {
                 self.app.clear_messages();
                 seed_tui_history_messages(self.app, next);
+                seed_tui_input_history(self.app, next);
             }
             SessionResetKind::Forked { intro } => {
                 self.app.clear_messages();
                 seed_tui_history_messages_with_intro(self.app, next, intro);
+                seed_tui_input_history(self.app, next);
             }
         }
     }
@@ -64,9 +75,22 @@ impl CommandSink for TuiAppSink<'_> {
 
 pub fn sync_tui_runtime(app: &mut TuiApp, runtime: &ReplRuntime) {
     app.set_runtime(
-        format!("{:?}", runtime.cfg.model.provider),
+        provider_label(&runtime.cfg.model.provider),
         runtime.cfg.model.model.clone(),
     );
+    app.set_context_window(runtime.cfg.model.capabilities.ctx_len);
+    app.set_last_prompt_tokens(0);
+}
+
+pub fn provider_label(provider: &impl std::fmt::Debug) -> String {
+    match format!("{provider:?}").as_str() {
+        "OpenAi" => "openai".into(),
+        "OpenAiCodex" | "Codex" => "codex".into(),
+        "Anthropic" => "anthropic".into(),
+        "Google" => "google".into(),
+        "OpenRouter" => "openrouter".into(),
+        other => other.to_lowercase(),
+    }
 }
 
 pub fn seed_tui_history_messages(app: &mut TuiApp, state: &RunState) {
@@ -77,13 +101,28 @@ pub fn seed_tui_history_messages(app: &mut TuiApp, state: &RunState) {
     );
 }
 
+pub fn seed_tui_input_history(app: &mut TuiApp, state: &RunState) {
+    let inputs = state
+        .history
+        .iter()
+        .filter_map(|message| match message {
+            Message::User { content } => {
+                let text = content_text(content);
+                (!text.trim().is_empty()).then_some(text)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    app.replace_input_history_texts(inputs);
+}
+
 pub fn seed_tui_history_messages_with_intro(
     app: &mut TuiApp,
     state: &RunState,
     intro: impl Into<String>,
 ) {
     const MAX_RESUME_MESSAGES: usize = 8;
-    app.add_system(intro.into());
+    app.add_activity(intro.into());
 
     let start = state.history.len().saturating_sub(MAX_RESUME_MESSAGES);
     let mut shown = 0usize;

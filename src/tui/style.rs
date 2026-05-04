@@ -8,30 +8,12 @@ use std::time::Duration;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Padding};
 use tui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::adapters::ExecJobState;
 
 use super::ChatRole;
-
-/// Shared chrome for full-bordered panels: rounded DarkGray border, cyan
-/// bold title surrounded by hair spaces, and one column of horizontal
-/// padding so content does not hug the border.
-pub(super) fn panel_block(title: &'static str) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .padding(Padding::horizontal(1))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-}
 
 pub(super) fn status_color(status: &str) -> Color {
     match status {
@@ -207,6 +189,7 @@ pub(super) fn role_style(role: &ChatRole) -> (&'static str, Style) {
         ChatRole::User => Color::Green,
         ChatRole::Assistant => Color::Cyan,
         ChatRole::System => Color::Yellow,
+        ChatRole::Warning => Color::Yellow,
         ChatRole::Error => Color::Red,
         // Tool rows live alongside the assistant's narrative; using a
         // dim magenta keeps them visually distinct from a plain assistant
@@ -219,10 +202,21 @@ pub(super) fn role_style(role: &ChatRole) -> (&'static str, Style) {
     )
 }
 
+pub(super) fn role_body_style(role: &ChatRole) -> Style {
+    match role {
+        ChatRole::System => Style::default().fg(Color::DarkGray),
+        ChatRole::Warning => Style::default().fg(Color::Yellow),
+        ChatRole::Error => Style::default().fg(Color::Red),
+        ChatRole::Tool => Style::default().fg(Color::Magenta),
+        ChatRole::User | ChatRole::Assistant => Style::default(),
+    }
+}
+
 pub(super) fn push_wrapped_message_line(
     lines: &mut Vec<Line<'static>>,
     label: &'static str,
     style: Style,
+    body_style: Style,
     raw: &str,
     width: usize,
 ) {
@@ -234,7 +228,7 @@ pub(super) fn push_wrapped_message_line(
         let prefix = if idx == 0 { label } else { "  " };
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), style),
-            Span::raw(part),
+            Span::styled(part, body_style),
         ]));
     }
 }

@@ -122,9 +122,9 @@ pub fn brief_msg(m: &crate::core::types::Message) -> String {
 
 pub fn print_banner(cfg: &Config) {
     println!(
-        "μAgent v{} — provider={:?} model={}",
+        "μAgent v{} — provider={} model={}",
         env!("CARGO_PKG_VERSION"),
-        cfg.model.provider,
+        cfg.model.provider.cli_name(),
         cfg.model.model
     );
     let store = store_label(cfg);

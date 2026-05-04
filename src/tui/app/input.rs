@@ -8,6 +8,9 @@ use super::super::style::{common_prefix, new_input, paste_line_count, trim_newli
 use super::types::{InputDraft, PasteBlock, TuiPanel, UserAction, UserSubmission};
 use super::TuiApp;
 
+const MAX_INPUT_HISTORY: usize = 100;
+const MAX_HISTORY_ENTRY_CHARS: usize = 8000;
+
 impl TuiApp {
     pub fn handle_paste(&mut self, text: String) -> UserAction {
         if text.is_empty() {
@@ -25,6 +28,7 @@ impl TuiApp {
 
         let line_count = paste_line_count(&text);
         let char_count = text.chars().count();
+        self.slash_popup_suppressed = false;
         if line_count <= 1 && char_count <= 400 {
             self.leave_history_navigation();
             self.input.insert_str(text);
@@ -35,9 +39,9 @@ impl TuiApp {
         UserAction::None
     }
 
-    /// Wheel up/down scrolls the chat history; other mouse events are
-    /// currently ignored. Steps by 3 rows per tick — enough to feel
-    /// responsive but small enough to land on the row you wanted.
+    /// Wheel up/down scrolls the chat history if the terminal reports mouse
+    /// events. Default terminal setup leaves mouse capture off so native text
+    /// selection remains available.
     pub fn handle_mouse(&mut self, event: MouseEvent) -> UserAction {
         match event.kind {
             MouseEventKind::ScrollUp => {
@@ -66,6 +70,11 @@ impl TuiApp {
                 UserAction::None
             }
             _ if self.panel != TuiPanel::Chat => self.handle_panel_key(key),
+            KeyCode::Esc if !self.slash_popup_entries().is_empty() => {
+                self.slash_popup_suppressed = true;
+                self.slash_popup_selected = 0;
+                UserAction::None
+            }
             KeyCode::Esc => UserAction::Cancel,
             KeyCode::Enter
                 if key.modifiers.contains(KeyModifiers::SHIFT)
@@ -80,6 +89,12 @@ impl TuiApp {
                 // command instead of submitting whatever the user partially
                 // typed.
                 self.accept_slash_popup();
+                UserAction::None
+            }
+            KeyCode::Enter if self.is_submit_locked() => {
+                // Keep the draft exactly where it is. Once queue pressure
+                // clears or cancellation fully settles, Enter will submit
+                // again.
                 UserAction::None
             }
             KeyCode::Enter => self
@@ -143,13 +158,14 @@ impl TuiApp {
             KeyCode::Home if self.input.is_empty() && self.pastes.is_empty() => {
                 // Symmetric jump-to-top so the user can quickly skim the
                 // beginning of a long transcript without holding PageUp.
-                self.scroll_back = u16::MAX;
+                self.scroll_back = usize::MAX;
                 UserAction::None
             }
             _ => {
                 self.leave_history_navigation();
                 // Any text edit changes the popup match set; reset selection
                 // so the user always sees the first match highlighted.
+                self.slash_popup_suppressed = false;
                 self.slash_popup_selected = 0;
                 self.input.input(key);
                 UserAction::None
@@ -264,11 +280,67 @@ impl TuiApp {
         self.input.lines().join("\n")
     }
 
+    pub fn replace_input_history_texts<I, S>(&mut self, texts: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.input_history.clear();
+        self.leave_history_navigation();
+        for text in texts {
+            self.push_input_history(InputDraft {
+                input_text: text.into(),
+                pastes: Vec::new(),
+            });
+        }
+    }
+
     fn current_draft(&self) -> InputDraft {
         InputDraft {
             input_text: self.current_input(),
             pastes: self.pastes.clone(),
         }
+    }
+
+    pub fn restore_queued_submissions_to_draft(
+        &mut self,
+        submissions: Vec<UserSubmission>,
+    ) -> usize {
+        let mut parts = Vec::new();
+        let current = draft_prompt_text(&self.current_draft());
+        if !current.trim().is_empty() {
+            parts.push(current);
+        }
+
+        let mut restored = 0usize;
+        for UserSubmission {
+            prompt,
+            input_text,
+            pastes,
+            ..
+        } in submissions
+        {
+            let draft = InputDraft { input_text, pastes };
+            let mut text = draft_prompt_text(&draft);
+            if text.trim().is_empty() {
+                text = prompt.trim().to_string();
+            }
+            if !text.trim().is_empty() {
+                parts.push(text);
+                restored += 1;
+            }
+        }
+
+        if restored > 0 {
+            self.set_input_draft(InputDraft {
+                input_text: parts.join("\n\n"),
+                pastes: Vec::new(),
+            });
+            self.leave_history_navigation();
+            self.panel = TuiPanel::Chat;
+            self.job_detail_scroll = 0;
+        }
+        restored
     }
 
     fn should_browse_history(&self) -> bool {
@@ -322,16 +394,22 @@ impl TuiApp {
 
     fn set_input_text(&mut self, text: &str) {
         let mut input = new_input();
-        input.insert_str(text);
+        if !text.is_empty() {
+            input.insert_str(text);
+        }
         self.input = input;
         self.pastes.clear();
+        self.slash_popup_suppressed = false;
     }
 
     pub(super) fn set_input_draft(&mut self, draft: InputDraft) {
         let mut input = new_input();
-        input.insert_str(&draft.input_text);
+        if !draft.input_text.is_empty() {
+            input.insert_str(&draft.input_text);
+        }
         self.input = input;
         self.pastes = draft.pastes;
+        self.slash_popup_suppressed = false;
     }
 
     pub(super) fn leave_history_navigation(&mut self) {
@@ -340,9 +418,6 @@ impl TuiApp {
     }
 
     fn push_input_history(&mut self, draft: InputDraft) {
-        const MAX_INPUT_HISTORY: usize = 100;
-        const MAX_HISTORY_ENTRY_CHARS: usize = 8000;
-
         let draft = normalized_draft(draft);
         if draft_prompt_text(&draft).chars().count() > MAX_HISTORY_ENTRY_CHARS {
             return;
@@ -371,6 +446,9 @@ impl TuiApp {
     /// `!entries.is_empty()` — folded into one walk so handlers don't
     /// iterate `REPL_COMMANDS` twice per keypress.
     pub(super) fn slash_popup_entries(&self) -> Vec<(&'static str, &'static str)> {
+        if self.slash_popup_suppressed {
+            return Vec::new();
+        }
         if self.panel != TuiPanel::Chat || !self.pastes.is_empty() {
             return Vec::new();
         }

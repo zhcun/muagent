@@ -47,7 +47,7 @@ pub struct TuiApp {
     pub(in crate::tui::app) selected_job: usize,
     pub(in crate::tui::app) job_detail_scroll: u16,
     pub(in crate::tui::app) messages: Vec<ChatMessage>,
-    pub(in crate::tui::app) scroll_back: u16,
+    pub(in crate::tui::app) scroll_back: usize,
     /// Set when the current status entered "running"; cleared on idle. The
     /// footer reads this to render an animated spinner with the elapsed
     /// turn time alongside the status word.
@@ -59,9 +59,12 @@ pub struct TuiApp {
     /// current match count on every keypress / render so it stays in range
     /// as the user narrows the prefix.
     pub(in crate::tui::app) slash_popup_selected: usize,
+    /// Set by Esc to hide slash suggestions without clearing the user's
+    /// partially typed command. Cleared on the next edit / completion.
+    pub(in crate::tui::app) slash_popup_suppressed: bool,
     /// Total context window in tokens for the active model. `None` hides
-    /// the header's `ctx [████░░░░] 32% / 128k` bar — host code provides
-    /// this when the model's window is known.
+    /// the header fill bar — host code provides this when the model's
+    /// window is known.
     pub(in crate::tui::app) context_window: Option<u32>,
     /// Prompt tokens sent on the most recent model step (i.e. the current
     /// context fill, not a cumulative session total). Set by host code
@@ -92,6 +95,7 @@ impl TuiApp {
             turn_started: None,
             turn_tokens: 0,
             slash_popup_selected: 0,
+            slash_popup_suppressed: false,
             context_window: None,
             last_prompt_tokens: 0,
         }
@@ -116,14 +120,14 @@ impl TuiApp {
 
     pub fn set_status(&mut self, status: impl Into<String>) {
         let next = status.into();
-        let was_running = self.status == "running";
-        let is_running = next == "running";
-        if !was_running && is_running {
+        let was_active = matches!(self.status.as_str(), "running" | "cancelling");
+        let is_active = matches!(next.as_str(), "running" | "cancelling");
+        if !was_active && is_active {
             // Start the turn timer + reset the per-turn token counter so the
             // footer spinner shows fresh elapsed/usage for this turn.
             self.turn_started = Some(Instant::now());
             self.turn_tokens = 0;
-        } else if was_running && !is_running {
+        } else if was_active && !is_active {
             self.turn_started = None;
         }
         self.status = next;
@@ -147,6 +151,16 @@ impl TuiApp {
         self.queued_inputs = inputs;
     }
 
+    pub(in crate::tui::app) fn is_submit_blocked_by_queue(&self) -> bool {
+        self.queue_limit > 0
+            && self.queue_len >= self.queue_limit
+            && matches!(self.status.as_str(), "running" | "cancelling")
+    }
+
+    pub(in crate::tui::app) fn is_submit_locked(&self) -> bool {
+        self.status == "cancelling" || self.is_submit_blocked_by_queue()
+    }
+
     pub fn add_activity(&mut self, text: impl Into<String>) {
         const MAX_ACTIVITY_LINES: usize = 20;
         self.activity.push(text.into());
@@ -160,6 +174,8 @@ impl TuiApp {
             input_text: submission.input_text,
             pastes: submission.pastes,
         });
+        self.panel = TuiPanel::Chat;
+        self.job_detail_scroll = 0;
     }
 
     /// `true` when the user has nothing in the input area — no typed text and
@@ -181,7 +197,17 @@ impl TuiApp {
         self.add(ChatRole::System, text);
     }
 
+    pub fn add_warning(&mut self, text: impl Into<String>) {
+        self.scroll_back = 0;
+        self.panel = TuiPanel::Chat;
+        self.job_detail_scroll = 0;
+        self.add(ChatRole::Warning, text);
+    }
+
     pub fn add_error(&mut self, text: impl Into<String>) {
+        self.scroll_back = 0;
+        self.panel = TuiPanel::Chat;
+        self.job_detail_scroll = 0;
         self.add(ChatRole::Error, text);
     }
 
@@ -221,6 +247,8 @@ impl TuiApp {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.scroll_back = 0;
+        self.panel = TuiPanel::Chat;
+        self.job_detail_scroll = 0;
     }
 
     pub fn set_sh_jobs(&mut self, jobs: Vec<ShJobView>) {
@@ -244,7 +272,7 @@ impl TuiApp {
         // can drift this slightly but that beats unconditionally jumping.
         if self.scroll_back > 0 {
             let added_lines = text.lines().count().max(1) + 1;
-            self.scroll_back = self.scroll_back.saturating_add(added_lines as u16);
+            self.scroll_back = self.scroll_back.saturating_add(added_lines);
         }
         self.messages.push(ChatMessage { role, text });
     }
@@ -443,6 +471,42 @@ mod tests {
     }
 
     #[test]
+    fn restore_queued_submissions_puts_all_items_in_input() {
+        let mut app = app();
+        type_text(&mut app, "draft");
+
+        let restored = app.restore_queued_submissions_to_draft(vec![
+            submission("first", "first", &[], false),
+            submission("second\n\npasted", "second", &["pasted"], false),
+        ]);
+
+        assert_eq!(restored, 2);
+        assert_eq!(app.current_input(), "draft\n\nfirst\n\nsecond\n\npasted");
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            UserAction::Submit(submission(
+                "draft\n\nfirst\n\nsecond\n\npasted",
+                "draft\n\nfirst\n\nsecond\n\npasted",
+                &[],
+                false
+            ))
+        );
+    }
+
+    #[test]
+    fn cancelling_locks_enter_without_clearing_draft() {
+        let mut app = app();
+        app.set_status("cancelling");
+        type_text(&mut app, "queued text");
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            UserAction::None
+        );
+        assert_eq!(app.current_input(), "queued text");
+    }
+
+    #[test]
     fn clear_messages_removes_old_transcript() {
         let mut app = app();
         app.add_user("old");
@@ -504,6 +568,34 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             UserAction::Submit(submission("first", "first", &[], false))
         );
+    }
+
+    #[test]
+    fn seeded_history_browses_all_entries_with_up_down() {
+        let mut app = app();
+        app.replace_input_history_texts((1..=5).map(|idx| format!("cmd {idx}")));
+
+        for expected in ["cmd 5", "cmd 4", "cmd 3", "cmd 2", "cmd 1"] {
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+                UserAction::None
+            );
+            assert_eq!(app.current_input(), expected);
+        }
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            UserAction::None
+        );
+        assert_eq!(app.current_input(), "cmd 1");
+
+        for expected in ["cmd 2", "cmd 3", "cmd 4", "cmd 5", ""] {
+            assert_eq!(
+                app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                UserAction::None
+            );
+            assert_eq!(app.current_input(), expected);
+        }
     }
 
     #[test]
@@ -683,16 +775,12 @@ mod tests {
 
         let screen = render_text(&app, 120, 22);
         assert!(screen.contains("μAgent"), "{screen}");
-        assert!(screen.contains("Messages"), "{screen}");
-        assert!(screen.contains("Activity"), "{screen}");
-        assert!(screen.contains("next 1:"), "{screen}");
         assert!(screen.contains("next prompt"), "{screen}");
-        assert!(screen.contains("Input"), "{screen}");
+        assert!(screen.contains("1/3 queued"), "{screen}");
         assert!(screen.contains("[pasted 3 lines, 13 chars]"), "{screen}");
-        assert!(screen.contains("sh bg: 1/2"), "{screen}");
-        assert!(screen.contains("Ctrl-B jobs"), "{screen}");
-        assert!(screen.contains("Tab cmd"), "{screen}");
-        assert!(screen.contains("Ctrl-C quit"), "{screen}");
+        assert!(screen.contains("sh 1/2"), "{screen}");
+        assert!(screen.contains("Ctrl-B"), "{screen}");
+        assert!(screen.contains("Enter"), "{screen}");
     }
 
     #[test]
@@ -750,21 +838,22 @@ mod tests {
         let _ = app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         let before = app.scroll_back;
         let _ = app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        assert_eq!(app.scroll_back, before, "g must not jump when input is non-empty");
+        assert_eq!(
+            app.scroll_back, before,
+            "g must not jump when input is non-empty"
+        );
     }
 
     #[test]
     fn queue_panel_shows_plus_more_when_truncated() {
         let mut app = app();
-        app.set_queued_inputs(
-            (1..=5).map(|i| format!("prompt {i}")).collect(),
-            10,
-        );
+        app.set_queued_inputs((1..=5).map(|i| format!("prompt {i}")).collect(), 10);
         let screen = render_text(&app, 120, 22);
-        assert!(screen.contains("next 1:"), "{screen}");
-        assert!(screen.contains("next 2:"), "{screen}");
-        // With 5 queued and a 3-row budget, expect a "+N more" tail.
-        assert!(screen.contains("more queued"), "{screen}");
+        assert!(screen.contains("1 prompt 1"), "{screen}");
+        assert!(screen.contains("2 prompt 2"), "{screen}");
+        // With 5 queued and a 3-row budget, expect a compact "+N queued" tail.
+        assert!(screen.contains("+"), "{screen}");
+        assert!(screen.contains("queued"), "{screen}");
     }
 
     #[test]
@@ -776,6 +865,20 @@ mod tests {
         app.add_assistant("STREAMED");
         let screen = render_text(&app, 80, 12);
         assert!(screen.contains("STREAMED"), "{screen}");
+    }
+
+    #[test]
+    fn pinned_view_follows_bottom_after_u16_sized_history() {
+        let mut app = app();
+        let mut lines = Vec::with_capacity(70_001);
+        for i in 0..70_000 {
+            lines.push(format!("line {i}"));
+        }
+        lines.push("BOTTOM_MARKER".into());
+        app.add_assistant(lines.join("\n"));
+
+        let screen = render_text(&app, 80, 16);
+        assert!(screen.contains("BOTTOM_MARKER"), "{screen}");
     }
 
     #[test]
@@ -801,7 +904,7 @@ mod tests {
         let screen = render_text(&app, 120, 22);
         let has_spinner = SPINNER_FRAMES.iter().any(|f| screen.contains(f));
         assert!(has_spinner, "{screen}");
-        assert!(screen.contains("running"), "{screen}");
+        assert!(screen.contains("Thinking"), "{screen}");
         assert!(screen.contains("1.2k tok"), "{screen}");
     }
 
@@ -810,11 +913,22 @@ mod tests {
         let mut app = app();
         app.set_status("idle");
         let screen = render_text(&app, 120, 22);
-        assert!(screen.contains("● idle"), "{screen}");
+        assert!(screen.contains("● Ready"), "{screen}");
         assert!(
             !SPINNER_FRAMES.iter().any(|f| screen.contains(f)),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn cancelling_status_renders_as_stopping() {
+        let mut app = app();
+        app.set_status("running");
+        app.set_status("cancelling");
+        let screen = render_text(&app, 120, 22);
+        let has_spinner = SPINNER_FRAMES.iter().any(|f| screen.contains(f));
+        assert!(has_spinner, "{screen}");
+        assert!(screen.contains("Stopping"), "{screen}");
     }
 
     #[test]
@@ -869,16 +983,18 @@ mod tests {
         app.set_context_window(Some(128_000));
         app.set_last_prompt_tokens(40_960); // 32% fill
         let screen = render_text(&app, 140, 22);
-        assert!(screen.contains("ctx ["), "{screen}");
+        assert!(screen.contains("["), "{screen}");
         assert!(screen.contains("32%"), "{screen}");
-        assert!(screen.contains("/ 128k tok"), "{screen}");
+        assert!(screen.contains("/128k"), "{screen}");
+        assert!(!screen.contains("ctx "), "{screen}");
+        assert!(!screen.contains(" tok"), "{screen}");
     }
 
     #[test]
     fn context_bar_hidden_when_window_is_none() {
         let app = app();
         let screen = render_text(&app, 140, 22);
-        assert!(!screen.contains("ctx ["), "{screen}");
+        assert!(!screen.contains("32%"), "{screen}");
     }
 
     #[test]
@@ -886,7 +1002,6 @@ mod tests {
         let mut app = app();
         type_text(&mut app, "/he");
         let screen = render_text(&app, 120, 22);
-        assert!(screen.contains("Commands"), "{screen}");
         assert!(screen.contains("/help"), "{screen}");
         assert!(screen.contains("show this help"), "{screen}");
 
@@ -966,10 +1081,10 @@ mod tests {
     }
 
     #[test]
-    fn footer_hides_sh_bg_badge_when_no_jobs() {
+    fn footer_hides_sh_badge_when_no_jobs() {
         let app = app();
         let screen = render_text(&app, 100, 22);
-        assert!(!screen.contains("sh bg"), "{screen}");
+        assert!(!screen.contains("sh "), "{screen}");
     }
 
     #[test]
@@ -979,8 +1094,8 @@ mod tests {
             app.add_activity(format!("step {i}"));
         }
         let screen = render_text(&app, 100, 22);
-        assert!(screen.contains("step 4"), "{screen}");
-        assert!(screen.contains("step 3"), "{screen}");
+        assert!(screen.contains("Step 4"), "{screen}");
+        assert!(!screen.contains("Step 0"), "{screen}");
         assert!(!screen.contains("status: idle"), "{screen}");
     }
 
@@ -1014,7 +1129,7 @@ mod tests {
         );
 
         let list = render_text(&app, 100, 22);
-        assert!(list.contains("Background sh jobs"), "{list}");
+        assert!(list.contains("sh jobs"), "{list}");
         assert!(list.contains("running"), "{list}");
         assert!(list.contains("sleep 10"), "{list}");
         assert!(list.contains("exit 0"), "{list}");
@@ -1024,10 +1139,10 @@ mod tests {
             UserAction::None
         );
         let detail = render_text(&app, 100, 22);
-        assert!(detail.contains("sh job detail"), "{detail}");
-        assert!(detail.contains("job_id: sh_1"), "{detail}");
-        assert!(detail.contains("command: sleep 10"), "{detail}");
-        assert!(detail.contains("stdout: 12B"), "{detail}");
+        assert!(detail.contains("sh job"), "{detail}");
+        assert!(detail.contains("sh_1"), "{detail}");
+        assert!(detail.contains("$ sleep 10"), "{detail}");
+        assert!(detail.contains("out 12B"), "{detail}");
     }
 
     #[test]

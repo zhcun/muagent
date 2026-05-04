@@ -22,13 +22,15 @@ use tracing::debug;
 use crate::cli_app::commands::{handle, CmdAction};
 use crate::cli_app::doctor::{config_doctor_report, model_setup_hints};
 use crate::cli_app::driver::{submit_and_drive_with_updates, TuiUpdate};
-use crate::cli_app::tui_helpers::{seed_tui_history_messages, TuiAppSink};
+use crate::cli_app::tui_helpers::{
+    provider_label, seed_tui_history_messages, seed_tui_input_history, sync_tui_runtime, TuiAppSink,
+};
 use crate::cli_app::{store_label, truncate, ReplRuntime, TUI_MAX_QUEUED_SUBMISSIONS};
 use crate::config::{Config, ConfigOverrides};
 use crate::core::clock::SystemClock;
 use crate::core::run_state::RunState;
 use crate::core::runner::Runner;
-use crate::core::step::Step;
+use crate::core::step::{PauseReason, Step};
 use crate::setup;
 use crate::tui::{
     ShJobView, TerminalSession, TuiApp, TuiConfig, TuiEvent, UserAction, UserSubmission,
@@ -48,10 +50,10 @@ pub async fn run_tui(
         overrides,
     };
     let mut app = TuiApp::new(tui_config(&runtime.cfg));
-    if state.history.is_empty() {
-        app.add_system("Type /help for commands.");
-    } else {
+    sync_tui_runtime(&mut app, &runtime);
+    if !state.history.is_empty() {
         seed_tui_history_messages(&mut app, &state);
+        seed_tui_input_history(&mut app, &state);
     }
     seed_tui_startup_hints(&mut app, &runtime.cfg);
 
@@ -79,18 +81,23 @@ pub async fn run_tui(
             .unwrap_or(false)
         {
             let handle = loop_state.inflight.take().expect("checked Some above");
-            finish_tui_run(handle, &mut loop_state.state_slot, &mut app).await?;
+            let continue_queue =
+                finish_tui_run(handle, &mut loop_state.state_slot, &mut app).await?;
             app.set_status("idle");
-            app.add_activity("turn finished");
+            app.add_activity("done");
             loop_state.confirm_quit_idle = false;
             refresh_tui_sh_jobs(&mut app, &runtime).await;
             if loop_state.exit_when_idle {
                 break;
             }
-            if start_next_queued_tui_submission(&mut loop_state, &mut runtime, clock, &mut app)
-                .await?
-            {
-                break;
+            if continue_queue {
+                if start_next_queued_tui_submission(&mut loop_state, &mut runtime, clock, &mut app)
+                    .await?
+                {
+                    break;
+                }
+            } else {
+                restore_queued_submissions_to_draft(&mut loop_state, &mut app);
             }
         }
 
@@ -112,16 +119,20 @@ pub async fn run_tui(
         };
 
         match action {
-            UserAction::None => {}
-            UserAction::Cancel => handle_cancel(&mut loop_state, &runtime, &mut app),
+            UserAction::None => {
+                loop_state.confirm_quit_idle = false;
+            }
+            UserAction::Cancel => {
+                loop_state.confirm_quit_idle = false;
+                handle_cancel(&mut loop_state, &runtime, &mut app);
+            }
             UserAction::Quit => {
                 if handle_quit(&mut loop_state, &runtime, &mut app) {
                     break;
                 }
             }
             UserAction::Submit(submission) => {
-                if handle_submit(submission, &mut loop_state, &mut runtime, clock, &mut app)
-                    .await?
+                if handle_submit(submission, &mut loop_state, &mut runtime, clock, &mut app).await?
                 {
                     break;
                 }
@@ -177,8 +188,9 @@ struct TuiLoopState {
     /// to idle, the loop exits.
     exit_when_idle: bool,
     /// Two-stage Ctrl-C confirmation when an idle quit would silently discard
-    /// queued submissions. Reset on any forward progress (Submit / Cancel /
-    /// turn completion) so the user is not asked to re-confirm out of context.
+    /// queued submissions or the current draft. Reset on any forward progress
+    /// (Submit / Cancel / turn completion) so the user is not asked to
+    /// re-confirm out of context.
     confirm_quit_idle: bool,
 }
 
@@ -198,10 +210,10 @@ fn handle_cancel(loop_state: &mut TuiLoopState, runtime: &ReplRuntime, app: &mut
     if loop_state.inflight.is_some() {
         loop_state.exit_when_idle = false;
         loop_state.confirm_quit_idle = false;
+        restore_queued_submissions_to_draft(loop_state, app);
         runtime.wired.runner.cancel();
         app.set_status("cancelling");
-        app.add_activity("cancel requested");
-        app.add_system("cancel requested for the current task.");
+        app.add_activity("stopping current task");
     }
     // Idle cancel is a no-op — Esc with nothing to cancel should not write
     // a noisy activity entry.
@@ -225,33 +237,66 @@ fn handle_quit(loop_state: &mut TuiLoopState, runtime: &ReplRuntime, app: &mut T
         loop_state.exit_when_idle = true;
         runtime.wired.runner.cancel();
         app.set_status("cancelling");
-        app.add_activity("cancel requested; will exit when current task stops");
-        let warn = if loop_state.queued.is_empty() {
-            "cancel requested; press Ctrl-C again to abort and exit.".to_string()
-        } else {
-            format!(
-                "cancel requested; press Ctrl-C again to abort and discard {} queued input(s).",
+        app.add_activity("stopping current task");
+        let has_draft = !app.is_input_blank();
+        let warn = match (!loop_state.queued.is_empty(), has_draft) {
+            (false, false) => "Stopping current task; press Ctrl-C again to force quit.".to_string(),
+            (false, true) => {
+                "Stopping current task; press Ctrl-C again to force quit and discard the current draft."
+                    .to_string()
+            }
+            (true, false) => format!(
+                "Stopping current task; press Ctrl-C again to force quit and discard {} queued input(s).",
                 loop_state.queued.len()
-            )
+            ),
+            (true, true) => format!(
+                "Stopping current task; press Ctrl-C again to force quit and discard {} queued input(s) plus the current draft.",
+                loop_state.queued.len()
+            ),
         };
-        app.add_system(warn);
+        app.add_warning(warn);
         false
-    } else if loop_state.queued.is_empty() {
+    } else if loop_state.queued.is_empty() && app.is_input_blank() {
         true
     } else if loop_state.confirm_quit_idle {
-        app.add_error(format!(
-            "discarded {} queued input(s) on quit.",
-            loop_state.queued.len()
-        ));
+        if !loop_state.queued.is_empty() {
+            app.add_error(format!(
+                "discarded {} queued input(s) on quit.",
+                loop_state.queued.len()
+            ));
+        }
         true
     } else {
         loop_state.confirm_quit_idle = true;
-        app.add_system(format!(
-            "press Ctrl-C again to quit and discard {} queued input(s).",
-            loop_state.queued.len()
-        ));
+        let warn = if !loop_state.queued.is_empty() && !app.is_input_blank() {
+            format!(
+                "press Ctrl-C again to quit and discard {} queued input(s) plus the current draft.",
+                loop_state.queued.len()
+            )
+        } else if !loop_state.queued.is_empty() {
+            format!(
+                "press Ctrl-C again to quit and discard {} queued input(s).",
+                loop_state.queued.len()
+            )
+        } else {
+            "press Ctrl-C again to quit and discard the current draft.".to_string()
+        };
+        app.add_warning(warn);
         false
     }
+}
+
+fn restore_queued_submissions_to_draft(loop_state: &mut TuiLoopState, app: &mut TuiApp) -> usize {
+    if loop_state.queued.is_empty() {
+        return 0;
+    }
+    let queued = loop_state.queued.drain(..).collect::<Vec<_>>();
+    let restored = app.restore_queued_submissions_to_draft(queued);
+    sync_tui_queue(app, &loop_state.queued);
+    if restored > 0 {
+        app.add_activity(format!("returned {restored} queued input(s) to draft"));
+    }
+    restored
 }
 
 /// Returns `true` if the loop should exit (slash-command quit).
@@ -267,10 +312,15 @@ async fn handle_submit(
         enqueue_submission(submission, loop_state, app);
         return Ok(false);
     }
+    let original_submission = submission.clone();
     match process_tui_submission(submission, &mut loop_state.state_slot, runtime, clock, app)
         .await?
     {
         TuiSubmissionOutcome::Continue => Ok(false),
+        TuiSubmissionOutcome::HoldQueue => {
+            app.restore_submission(original_submission);
+            Ok(false)
+        }
         TuiSubmissionOutcome::Quit => Ok(true),
         TuiSubmissionOutcome::Started(handle) => {
             loop_state.inflight = Some(handle);
@@ -287,27 +337,20 @@ fn enqueue_submission(submission: UserSubmission, loop_state: &mut TuiLoopState,
             // since pressing Enter.
             app.restore_submission(submission);
             app.add_error(format!(
-                "queued input limit reached ({TUI_MAX_QUEUED_SUBMISSIONS}); your input was restored to the draft."
+                "Queue limit reached ({TUI_MAX_QUEUED_SUBMISSIONS}); your input was restored to the draft."
             ));
         } else {
             // User is mid-typing something else. Don't overwrite their
             // draft — surface the dropped text so they can paste it back.
             app.add_error(format!(
-                "queued input limit reached ({TUI_MAX_QUEUED_SUBMISSIONS}); dropped: {}",
+                "Queue limit reached ({TUI_MAX_QUEUED_SUBMISSIONS}); dropped: {}",
                 truncate(&submission.prompt.replace('\n', " "), 200)
             ));
         }
         return;
     }
-    let position = loop_state.queued.len() + 1;
     loop_state.queued.push_back(submission);
     sync_tui_queue(app, &loop_state.queued);
-    app.add_activity(format!(
-        "queued input #{position}/{TUI_MAX_QUEUED_SUBMISSIONS}"
-    ));
-    app.add_system(format!(
-        "queued input #{position}; it will run after the current turn."
-    ));
 }
 
 struct TuiRunComplete {
@@ -322,6 +365,7 @@ pub struct TuiInflightRun {
 
 enum TuiSubmissionOutcome {
     Continue,
+    HoldQueue,
     Quit,
     Started(TuiInflightRun),
 }
@@ -355,7 +399,7 @@ async fn finish_tui_run(
     mut run: TuiInflightRun,
     state_slot: &mut Option<RunState>,
     app: &mut TuiApp,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     drain_tui_run_updates(Some(&mut run), app);
     let complete = run
         .handle
@@ -365,8 +409,12 @@ async fn finish_tui_run(
         Ok(()) => append_tui_turn_result(app, &complete.state),
         Err(e) => app.add_error(e.clone()),
     }
+    let continue_queue = matches!(
+        (&complete.result, &complete.state.step),
+        (Ok(()), Step::Done { .. })
+    );
     *state_slot = Some(complete.state);
-    Ok(())
+    Ok(continue_queue)
 }
 
 fn drain_tui_run_updates(run: Option<&mut TuiInflightRun>, app: &mut TuiApp) {
@@ -377,6 +425,7 @@ fn drain_tui_run_updates(run: Option<&mut TuiInflightRun>, app: &mut TuiApp) {
         match update {
             TuiUpdate::Activity(text) => app.add_activity(text),
             TuiUpdate::Assistant(text) => app.add_assistant(text),
+            TuiUpdate::PromptTokens(tokens) => app.set_last_prompt_tokens(tokens),
             TuiUpdate::Tokens(delta) => app.add_turn_tokens(delta),
             TuiUpdate::Tool {
                 display,
@@ -402,16 +451,17 @@ async fn process_tui_submission(
             .as_mut()
             .ok_or_else(|| "internal tui state unavailable while run is active".to_string())?;
         let mut sink = TuiAppSink::new(app);
-        return Ok(
-            match handle(trimmed, state, runtime, clock, &mut sink).await {
-                CmdAction::Continue => TuiSubmissionOutcome::Continue,
-                CmdAction::Quit => TuiSubmissionOutcome::Quit,
-                CmdAction::Reset(new_state) => {
-                    *state = *new_state;
-                    TuiSubmissionOutcome::Continue
-                }
-            },
-        );
+        let action = handle(trimmed, state, runtime, clock, &mut sink).await;
+        let had_error = sink.had_error();
+        return Ok(match action {
+            CmdAction::Continue if had_error => TuiSubmissionOutcome::HoldQueue,
+            CmdAction::Continue => TuiSubmissionOutcome::Continue,
+            CmdAction::Quit => TuiSubmissionOutcome::Quit,
+            CmdAction::Reset(new_state) => {
+                *state = *new_state;
+                TuiSubmissionOutcome::Continue
+            }
+        });
     }
 
     start_tui_prompt(runtime, state_slot, app, prompt).map(TuiSubmissionOutcome::Started)
@@ -428,11 +478,17 @@ async fn start_next_queued_tui_submission(
             sync_tui_queue(app, &loop_state.queued);
             return Ok(false);
         };
+        let original_submission = submission.clone();
         sync_tui_queue(app, &loop_state.queued);
         match process_tui_submission(submission, &mut loop_state.state_slot, runtime, clock, app)
             .await?
         {
             TuiSubmissionOutcome::Continue => {}
+            TuiSubmissionOutcome::HoldQueue => {
+                loop_state.queued.push_front(original_submission);
+                restore_queued_submissions_to_draft(loop_state, app);
+                return Ok(false);
+            }
             TuiSubmissionOutcome::Quit => return Ok(true),
             TuiSubmissionOutcome::Started(handle) => {
                 loop_state.inflight = Some(handle);
@@ -450,7 +506,12 @@ fn sync_tui_queue(app: &mut TuiApp, queued: &VecDeque<UserSubmission>) {
 }
 
 fn queued_submission_label(submission: &UserSubmission) -> String {
-    truncate(&submission.prompt.replace('\n', " "), 120)
+    queued_prompt_label(&submission.prompt)
+}
+
+fn queued_prompt_label(prompt: &str) -> String {
+    let one_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate(&one_line, 120)
 }
 
 async fn refresh_tui_sh_jobs(app: &mut TuiApp, runtime: &ReplRuntime) {
@@ -478,8 +539,13 @@ fn append_tui_turn_result(app: &mut TuiApp, state: &RunState) {
         Step::Failed { reason, .. } => {
             app.add_error(format!("failed: {reason}"));
         }
+        Step::Paused {
+            reason: PauseReason::HostRequested,
+        } => {
+            app.add_warning("Stopped current task.");
+        }
         Step::Paused { reason } => {
-            app.add_system(format!("paused: {reason:?}"));
+            app.add_system(format!("Paused: {}", pause_reason_label(reason)));
         }
         other => {
             app.add_system(format!("run did not finish; step={other:?}"));
@@ -487,9 +553,16 @@ fn append_tui_turn_result(app: &mut TuiApp, state: &RunState) {
     }
 }
 
+fn pause_reason_label(reason: &PauseReason) -> String {
+    match reason {
+        PauseReason::HostRequested => "stopped by user".into(),
+        PauseReason::BudgetExceeded { dim } => format!("budget exceeded ({dim})"),
+    }
+}
+
 fn tui_config(cfg: &Config) -> TuiConfig {
     TuiConfig {
-        provider: format!("{:?}", cfg.model.provider),
+        provider: provider_label(&cfg.model.provider),
         model: cfg.model.model.clone(),
         store: store_label(cfg),
         root: cfg.fs.root.display().to_string(),
@@ -498,12 +571,28 @@ fn tui_config(cfg: &Config) -> TuiConfig {
 
 fn seed_tui_startup_hints(app: &mut TuiApp, cfg: &Config) {
     let hints = model_setup_hints(cfg);
-    if hints.is_empty() {
-        app.add_activity("config ready");
-    } else {
-        for hint in hints {
-            app.add_system(format!("Setup hint: {hint}"));
-        }
-        app.add_activity("setup hints available");
+    for hint in hints {
+        app.add_warning(format!("Setup: {hint}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::queued_prompt_label;
+
+    #[test]
+    fn queued_prompt_label_shows_front_of_prompt() {
+        let label = queued_prompt_label(
+            "first queued task should be visible to the user\nwith a hidden second line",
+        );
+        assert!(label.starts_with("first queued task should be visible"));
+        assert!(!label.contains('\n'));
+    }
+
+    #[test]
+    fn queued_prompt_label_truncates_long_prompt() {
+        let label = queued_prompt_label(&"x".repeat(200));
+        assert_eq!(label.chars().count(), 121);
+        assert!(label.ends_with('…'));
     }
 }

@@ -29,6 +29,7 @@ pub enum ChatRole {
     User,
     Assistant,
     System,
+    Warning,
     Error,
     /// A tool invocation rendered inline in the conversation flow, e.g.
     /// `⏺ Bash(sleep 10) ✓` or `⏺ Update(src/foo.rs) ✗ failed`.

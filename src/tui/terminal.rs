@@ -7,8 +7,7 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyEvent, MouseEvent,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, MouseEvent,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -27,9 +26,9 @@ pub struct TerminalSession {
 pub enum TuiEvent {
     Key(KeyEvent),
     Paste(String),
-    /// Wheel / click events delivered by crossterm's mouse capture. The
-    /// app handler currently only acts on scroll up/down, but exposing the
-    /// raw event keeps room for future click-to-select / drag interactions.
+    /// Mouse events, when the terminal sends them. We intentionally do not
+    /// enable mouse capture by default so native text selection/copy keeps
+    /// working in common terminals.
     Mouse(MouseEvent),
 }
 
@@ -43,23 +42,13 @@ impl TerminalSession {
             return Err(err);
         }
         let _ = execute!(stdout, EnableBracketedPaste);
-        // Mouse capture lets us route wheel events to scroll the chat. The
-        // tradeoff: the terminal's native click-and-drag selection is
-        // intercepted, so users select text via Shift+drag (most terminals
-        // honour this as a "passthrough" gesture).
-        let _ = execute!(stdout, EnableMouseCapture);
 
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = match Terminal::new(backend) {
             Ok(terminal) => terminal,
             Err(err) => {
                 let _ = disable_raw_mode();
-                let _ = execute!(
-                    io::stdout(),
-                    DisableBracketedPaste,
-                    DisableMouseCapture,
-                    LeaveAlternateScreen
-                );
+                let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
                 return Err(err);
             }
         };
@@ -68,7 +57,6 @@ impl TerminalSession {
             let _ = execute!(
                 terminal.backend_mut(),
                 DisableBracketedPaste,
-                DisableMouseCapture,
                 LeaveAlternateScreen
             );
             return Err(err);
