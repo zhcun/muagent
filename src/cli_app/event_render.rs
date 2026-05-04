@@ -239,6 +239,20 @@ pub fn tool_result_extra_line(tool: &str, detail: &serde_json::Value) -> Option<
                 _ => None,
             }
         }
+        "sh_exec" => {
+            let exit = n(detail, "exit");
+            let stdout = n(detail, "stdout_bytes").unwrap_or(0);
+            let stderr = n(detail, "stderr_bytes").unwrap_or(0);
+            let state = detail
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            match (exit, state.is_empty()) {
+                (Some(code), _) => Some(format!("exit {code} · out {stdout}B · err {stderr}B")),
+                (None, false) => Some(format!("{state} · out {stdout}B · err {stderr}B")),
+                (None, true) => None,
+            }
+        }
         _ => None,
     }
 }
@@ -284,6 +298,24 @@ mod tests {
                 &json!({"uri":"file:///tmp/a.txt","edits":[{"old_text":"a","new_text":"b"}],"dry_run":true})
             ),
             "Update(/tmp/a.txt; 1 edit; dry-run)"
+        );
+    }
+
+    #[test]
+    fn sh_exec_extra_line_summarizes_exit_and_output() {
+        assert_eq!(
+            super::tool_result_extra_line(
+                "sh_exec",
+                &json!({"exit":7,"stdout_bytes":12,"stderr_bytes":3})
+            ),
+            Some("exit 7 · out 12B · err 3B".into())
+        );
+        assert_eq!(
+            super::tool_result_extra_line(
+                "sh_exec",
+                &json!({"state":"running","stdout_bytes":12,"stderr_bytes":3})
+            ),
+            Some("running · out 12B · err 3B".into())
         );
     }
 

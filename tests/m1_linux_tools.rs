@@ -350,6 +350,42 @@ async fn m1_sh_exec_nonzero_exit_is_still_tool_output() {
     let _ = std::fs::remove_dir(&tmp);
 }
 
+#[tokio::test]
+async fn m1_sh_exec_reports_stderr_and_output_metadata() {
+    let tmp = tempdir();
+    let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
+    let proc = Arc::new(LinuxProcessExec::new());
+    let bundle = Arc::new(AdapterBundle::builder().fs(fs).proc(proc).build().unwrap());
+    let registry = Arc::new(CapabilityRegistry::new());
+    muagent::capabilities::tools::register_defaults(&registry, bundle);
+    let executor = DefaultToolExecutor::new(registry);
+
+    let c = call(
+        "s1",
+        "sh_exec",
+        json!({
+            "bin": "sh",
+            "args": ["-c", "printf out; printf err >&2; exit 5"],
+        }),
+    );
+    let r = executor
+        .execute(&c, &ToolContext::ephemeral(), CancelToken::never())
+        .await
+        .unwrap();
+
+    assert!(r.ok, "{:?}", r);
+    let detail = r.detail.as_ref().unwrap();
+    assert_eq!(detail["state"], "exited");
+    assert_eq!(detail["exit"], 5);
+    assert_eq!(detail["stdout_bytes"], 3);
+    assert_eq!(detail["stderr_bytes"], 3);
+    assert!(r.text().contains("exit 5"));
+    assert!(r.text().contains("--- stdout ---\nout"));
+    assert!(r.text().contains("--- stderr ---\nerr"));
+
+    let _ = std::fs::remove_dir(&tmp);
+}
+
 // -------- Test 4:sh.exec runs any PATH binary --------
 
 #[tokio::test]

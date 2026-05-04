@@ -5,11 +5,18 @@
 //! `config::Config::load` reads. CLI flags win over env without mutating the
 //! process environment.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::OnceLock;
 
-use tracing_subscriber::EnvFilter;
+use flexi_logger::{writers::FileLogWriter, Cleanup, Criterion, FileSpec, Naming, WriteMode};
+use tracing_subscriber::{
+    fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer as _,
+};
 
 use crate::config::{parse_list_arg, ConfigOverrides};
+
+static LOG_FILE_HANDLE: OnceLock<flexi_logger::writers::FileLogWriterHandle> = OnceLock::new();
 
 /// Single source of truth for interactive command list. Both `/help` and the CLI
 /// `--help` read from here so the two views stay aligned. The TUI's tab
@@ -671,6 +678,10 @@ OPTIONS:
                           MUAGENT_MAX_SUMMARY_ROUNDS.
       --log <FILTER>      tracing EnvFilter, e.g. `muagent=debug,info`.
                           (env: MUAGENT_LOG, falls back to RUST_LOG)
+                          File logs default to ~/.muagent/logs with size
+                          rotation. Env: MUAGENT_LOG_FILE=off|<dir>,
+                          MUAGENT_LOG_FILE_FILTER, MUAGENT_LOG_FILE_MAX_BYTES,
+                          MUAGENT_LOG_FILE_KEEP.
                           Advanced env: MUAGENT_MAX_STEPS controls the
                           model/tool loop step safety limit (default 10000).
                           MUAGENT_BAD_TOOL_EVENT_LIMIT can stop repeated
@@ -732,29 +743,133 @@ INTERACTIVE COMMANDS:
     );
 }
 
-/// Initialize the tracing subscriber. Respects MUAGENT_LOG → RUST_LOG.
-/// TUI sessions default to quiet logging so stderr does not paint over the
-/// alternate-screen UI.
+/// Initialize the tracing subscriber.
+///
+/// Console logging respects `--log` / `MUAGENT_LOG` / `RUST_LOG`; TUI sessions
+/// still keep stderr quiet by default so logs do not paint over the
+/// alternate-screen UI. File logging is separate and enabled by default under
+/// `~/.muagent/logs`, with size-based rotation similar to a production log
+/// handler.
 pub fn init_tracing(cli_filter: Option<&str>, tui_session: bool) {
     let explicit_filter = cli_filter
         .map(ToOwned::to_owned)
         .or_else(|| std::env::var("MUAGENT_LOG").ok())
         .or_else(|| std::env::var("RUST_LOG").ok());
-    let filter = explicit_filter.unwrap_or_else(|| {
+    let console_filter = explicit_filter.clone().unwrap_or_else(|| {
         if tui_session {
             "off".into()
         } else {
             "muagent=info,warn".into()
         }
     });
-    let env_filter =
-        EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("muagent=info,warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
+    let file_filter = std::env::var("MUAGENT_LOG_FILE_FILTER")
+        .ok()
+        .or(explicit_filter)
+        .unwrap_or_else(|| "muagent=debug,info".into());
+
+    let console_filter =
+        EnvFilter::try_new(&console_filter).unwrap_or_else(|_| EnvFilter::new("muagent=info,warn"));
+    let file_filter =
+        EnvFilter::try_new(&file_filter).unwrap_or_else(|_| EnvFilter::new("muagent=debug,info"));
+
+    let console_layer = fmt::layer()
         .with_target(false)
         .with_writer(std::io::stderr)
         .with_ansi(atty_stderr())
-        .try_init();
+        .with_filter(console_filter);
+
+    if let Some(file_layer) = file_log_layer(file_filter) {
+        let _ = tracing_subscriber::registry()
+            .with(console_layer)
+            .with(file_layer)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry()
+            .with(console_layer)
+            .try_init();
+    }
+}
+
+fn file_log_layer<S>(
+    filter: EnvFilter,
+) -> Option<impl tracing_subscriber::Layer<S> + Send + Sync + 'static>
+where
+    S: tracing::Subscriber,
+    S: for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    let dir = file_log_dir()?;
+    let max_bytes = env_u64("MUAGENT_LOG_FILE_MAX_BYTES").unwrap_or(10 * 1024 * 1024);
+    let keep_files = env_usize("MUAGENT_LOG_FILE_KEEP").unwrap_or(8);
+    let (file_writer, handle) =
+        match FileLogWriter::builder(FileSpec::default().directory(dir).basename("muagent"))
+            .append()
+            .use_utc()
+            .write_mode(WriteMode::Direct)
+            .rotate(
+                Criterion::Size(max_bytes.max(1024)),
+                Naming::Numbers,
+                Cleanup::KeepLogFiles(keep_files.max(1)),
+            )
+            .try_build_with_handle()
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("muagent: file logging disabled: {e}");
+                return None;
+            }
+        };
+    // Keep the file writer handle alive for the process lifetime. The current
+    // writer mode is synchronous, so each record is written immediately; the
+    // handle still owns lifecycle hooks such as explicit rotation/shutdown.
+    let _ = LOG_FILE_HANDLE.set(handle);
+    Some(
+        fmt::layer()
+            .json()
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(move || file_writer.clone())
+            .with_filter(filter),
+    )
+}
+
+fn file_log_dir() -> Option<PathBuf> {
+    match std::env::var("MUAGENT_LOG_FILE") {
+        Ok(v) if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("false") => return None,
+        Ok(v) if !v.trim().is_empty() => return Some(expand_home(v.trim())),
+        _ => {}
+    }
+    Some(default_log_dir())
+}
+
+fn default_log_dir() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".muagent")
+        .join("logs")
+}
+
+fn expand_home(path: &str) -> PathBuf {
+    if path == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name).ok()?.parse().ok()
 }
 
 fn atty_stderr() -> bool {

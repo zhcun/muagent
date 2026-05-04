@@ -288,6 +288,8 @@ struct ManagedInner {
     kill_requested: bool,
     error: Option<String>,
     tail_cap: usize,
+    stdout_closed: bool,
+    stderr_closed: bool,
 }
 
 impl LinuxProcessExec {
@@ -366,26 +368,20 @@ impl ProcessExec for LinuxProcessExec {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut total_output = 0_u64;
-        let mut exit_code: Option<i32> = None;
         let mut pipes_closed = false;
-
-        loop {
-            if exit_code.is_some() && pipes_closed {
-                break;
-            }
-
+        let exit_code = loop {
             tokio::select! {
-                _ = &mut cancel_wait, if exit_code.is_none() => {
+                _ = &mut cancel_wait => {
                     kill_child_tree(child_pid, &mut child).await;
                     return Err(ExecErr::Killed);
                 }
-                _ = &mut timeout_sleep, if exit_code.is_none() => {
+                _ = &mut timeout_sleep => {
                     kill_child_tree(child_pid, &mut child).await;
                     return Err(ExecErr::Timeout);
                 }
-                status = child.wait(), if exit_code.is_none() => {
+                status = child.wait() => {
                     let status = status.map_err(|e| ExecErr::Io(e.to_string()))?;
-                    exit_code = Some(status.code().unwrap_or(-1));
+                    break status.code().unwrap_or(-1);
                 }
                 msg = rx.recv(), if !pipes_closed => {
                     match msg {
@@ -405,19 +401,43 @@ impl ProcessExec for LinuxProcessExec {
                             }
                         }
                         Some(Err(e)) => {
-                            if exit_code.is_none() {
-                                kill_child_tree(child_pid, &mut child).await;
-                            }
+                            kill_child_tree(child_pid, &mut child).await;
                             return Err(ExecErr::Io(e));
                         }
                         None => pipes_closed = true,
                     }
                 }
             }
+        };
+
+        if !pipes_closed {
+            pipes_closed = drain_pipe_channel(
+                &mut rx,
+                &mut stdout,
+                &mut stderr,
+                &mut total_output,
+                spec.max_output_bytes,
+                pipe_drain_grace(),
+            )
+            .await?;
+        }
+        if !pipes_closed {
+            if let Some(pid) = child_pid {
+                kill_process_group(pid);
+            }
+            let _ = drain_pipe_channel(
+                &mut rx,
+                &mut stdout,
+                &mut stderr,
+                &mut total_output,
+                spec.max_output_bytes,
+                pipe_kill_drain_grace(),
+            )
+            .await?;
         }
 
         Ok(ExitOut {
-            code: exit_code.unwrap_or(-1),
+            code: exit_code,
             stdout,
             stderr,
             truncated: false,
@@ -466,6 +486,8 @@ impl ProcessExec for LinuxProcessExec {
                 kill_requested: false,
                 error: None,
                 tail_cap,
+                stdout_closed: stdout.is_none(),
+                stderr_closed: stderr.is_none(),
             }),
         });
 
@@ -526,6 +548,7 @@ impl ProcessExec for LinuxProcessExec {
                 }
             }
         }
+        wait_for_managed_pipe_drain(&job, pipe_drain_grace()).await;
         Ok(snapshot(&job))
     }
 
@@ -579,7 +602,10 @@ where
     let mut buf = vec![0_u8; 8192];
     loop {
         match reader.read(&mut buf).await {
-            Ok(0) => return,
+            Ok(0) => {
+                mark_managed_pipe_closed(&job, kind);
+                return;
+            }
             Ok(n) => {
                 let mut inner = job.inner.lock().expect("job mutex poisoned");
                 let tail_cap = inner.tail_cap;
@@ -610,6 +636,10 @@ where
                 if inner.error.is_none() {
                     inner.error = Some(e.to_string());
                 }
+                match kind {
+                    PipeKind::Stdout => inner.stdout_closed = true,
+                    PipeKind::Stderr => inner.stderr_closed = true,
+                }
                 if inner.state == ExecJobState::Running {
                     inner.state = ExecJobState::Error;
                 }
@@ -629,25 +659,30 @@ async fn wait_managed_child(
     tokio::pin!(timeout_sleep);
     let kill_poll = tokio::time::sleep(Duration::from_millis(100));
     tokio::pin!(kill_poll);
+    let mut timeout_fired = false;
+    let mut forced_state: Option<ExecJobState> = None;
 
     loop {
         tokio::select! {
             status = child.wait() => {
                 let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
+                let pipes_closed = wait_for_managed_pipe_drain(&job, pipe_drain_grace()).await;
+                if !pipes_closed {
+                    if let Some(pid) = child_pid {
+                        kill_process_group(pid);
+                    }
+                    wait_for_managed_pipe_drain(&job, pipe_kill_drain_grace()).await;
+                }
                 let mut inner = job.inner.lock().expect("job mutex poisoned");
                 inner.code = Some(code);
                 if inner.state == ExecJobState::Running {
-                    inner.state = ExecJobState::Exited;
+                    inner.state = forced_state.unwrap_or(ExecJobState::Exited);
                 }
                 return;
             }
-            _ = &mut timeout_sleep => {
-                {
-                    let mut inner = job.inner.lock().expect("job mutex poisoned");
-                    if inner.state == ExecJobState::Running {
-                        inner.state = ExecJobState::TimedOut;
-                    }
-                }
+            _ = &mut timeout_sleep, if !timeout_fired => {
+                timeout_fired = true;
+                forced_state = Some(ExecJobState::TimedOut);
                 kill_child_tree(child_pid, &mut child).await;
             }
             _ = &mut kill_poll => {
@@ -656,10 +691,10 @@ async fn wait_managed_child(
                     inner.kill_requested
                 };
                 if should_kill {
+                    forced_state.get_or_insert(ExecJobState::Killed);
                     kill_child_tree(child_pid, &mut child).await;
-                } else {
-                    kill_poll.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(100));
                 }
+                kill_poll.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(100));
             }
         }
     }
@@ -692,6 +727,69 @@ fn append_tail(dst: &mut Vec<u8>, bytes: &[u8], cap: usize) {
         let drop = dst.len() - cap;
         dst.drain(..drop);
     }
+}
+
+async fn drain_pipe_channel(
+    rx: &mut mpsc::Receiver<Result<PipeChunk, String>>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    total_output: &mut u64,
+    max_output_bytes: u64,
+    grace: Duration,
+) -> Result<bool, ExecErr> {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(Ok(chunk))) => {
+                let ok = match chunk.kind {
+                    PipeKind::Stdout => {
+                        append_capped(stdout, &chunk.bytes, total_output, max_output_bytes)
+                    }
+                    PipeKind::Stderr => {
+                        append_capped(stderr, &chunk.bytes, total_output, max_output_bytes)
+                    }
+                };
+                if !ok {
+                    return Err(ExecErr::OutputTooLarge);
+                }
+            }
+            Ok(Some(Err(e))) => return Err(ExecErr::Io(e)),
+            Ok(None) => return Ok(true),
+            Err(_) => return Ok(false),
+        }
+    }
+}
+
+fn mark_managed_pipe_closed(job: &ManagedJob, kind: PipeKind) {
+    let mut inner = job.inner.lock().expect("job mutex poisoned");
+    match kind {
+        PipeKind::Stdout => inner.stdout_closed = true,
+        PipeKind::Stderr => inner.stderr_closed = true,
+    }
+}
+
+async fn wait_for_managed_pipe_drain(job: &ManagedJob, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    loop {
+        {
+            let inner = job.inner.lock().expect("job mutex poisoned");
+            if inner.stdout_closed && inner.stderr_closed {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn pipe_drain_grace() -> Duration {
+    Duration::from_millis(200)
+}
+
+fn pipe_kill_drain_grace() -> Duration {
+    Duration::from_millis(100)
 }
 
 fn render_command(spec: &CmdSpec) -> String {

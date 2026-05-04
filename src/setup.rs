@@ -172,6 +172,22 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
     };
 
     let retry_policy = RetryPolicy::from_env()?;
+    tracing::info!(
+        target: "muagent::setup",
+        kind = "runtime_wired",
+        provider = cfg.model.provider.cli_name(),
+        model = %cfg.model.model,
+        base_url = %cfg.model.base_url,
+        fs_root = %cfg.fs.root.display(),
+        store = %store_label(&cfg.store),
+        cache_auto = cfg.runtime.cache_auto,
+        thinking_mode = ?cfg.runtime.thinking_mode,
+        thinking_effort = ?cfg.runtime.thinking_effort,
+        compaction_max_tokens = cfg.compaction.max_tokens,
+        compaction_threshold = cfg.compaction.threshold_ratio,
+        skill_autoload = cfg.capabilities.skill_autoload,
+        "runtime wired"
+    );
 
     let runner = Runner::builder()
         .model(model)
@@ -192,6 +208,13 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
         sessions,
         adapters: bundle,
     })
+}
+
+fn store_label(store: &StoreConfig) -> String {
+    match store {
+        StoreConfig::Memory => "memory".into(),
+        StoreConfig::Jsonl(path) => format!("jsonl:{}", path.display()),
+    }
 }
 
 const DEFAULT_SYSTEM_PROMPT_L0: &str = include_str!("prompts/default-system.md");

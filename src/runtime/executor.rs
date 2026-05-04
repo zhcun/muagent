@@ -96,6 +96,17 @@ impl ToolExecutor for DefaultToolExecutor {
         ctx: &ToolContext,
         cancel: CancelToken,
     ) -> Result<ToolResult, ToolExecutorError> {
+        tracing::debug!(
+            target: "muagent::tool_executor",
+            kind = "tool_executor_start",
+            run_id = %ctx.run_id,
+            session_id = %ctx.session_id,
+            turn = ctx.turn,
+            call_id = %call.id,
+            tool = %call.tool_name,
+            args_hash = %call.args_hash,
+            "tool executor started"
+        );
         if call.tool_name == TOOL_PROTOCOL_ERROR_TOOL {
             let message = call
                 .args
@@ -114,6 +125,16 @@ impl ToolExecutor for DefaultToolExecutor {
 
         // 1) allowlist 过滤 — 不在 list 里直接返 ToolResult 给 LLM 看。
         if !self.is_allowed(&call.tool_name) {
+            tracing::warn!(
+                target: "muagent::tool_executor",
+                kind = "tool_denied_by_filter",
+                run_id = %ctx.run_id,
+                session_id = %ctx.session_id,
+                turn = ctx.turn,
+                call_id = %call.id,
+                tool = %call.tool_name,
+                "tool denied by allowlist/denylist"
+            );
             let result = ToolResult::err(
                 format!(
                     "Tool `{}` is not available in this session. \
@@ -134,6 +155,16 @@ impl ToolExecutor for DefaultToolExecutor {
         let tool = match self.resolve(&call.tool_name) {
             Some(t) => t,
             None => {
+                tracing::warn!(
+                    target: "muagent::tool_executor",
+                    kind = "tool_not_registered",
+                    run_id = %ctx.run_id,
+                    session_id = %ctx.session_id,
+                    turn = ctx.turn,
+                    call_id = %call.id,
+                    tool = %call.tool_name,
+                    "tool not registered"
+                );
                 let result = ToolResult::err(
                     format!(
                         "Tool `{}` does not exist (not registered). \
@@ -151,6 +182,18 @@ impl ToolExecutor for DefaultToolExecutor {
         match tool.guard(&call.args) {
             GuardOutcome::Allow => {}
             GuardOutcome::Deny { reason, hint } => {
+                tracing::warn!(
+                    target: "muagent::tool_executor",
+                    kind = "tool_guard_denied",
+                    run_id = %ctx.run_id,
+                    session_id = %ctx.session_id,
+                    turn = ctx.turn,
+                    call_id = %call.id,
+                    tool = %call.tool_name,
+                    reason = %reason,
+                    hint = %hint.as_deref().unwrap_or(""),
+                    "tool guard denied call"
+                );
                 let result = ToolResult::err(reason, false, hint);
                 return Ok(enforce_max_out(result, tool.descriptor().max_out_tokens));
             }
@@ -164,12 +207,49 @@ impl ToolExecutor for DefaultToolExecutor {
         let result = match outcome {
             Ok(Ok(Ok(ok))) => to_result_ok(ok),
             Ok(Ok(Err(e))) => to_result_err(e),
-            Ok(Err(_elapsed)) => ToolResult::err("timeout", true, Some("try smaller input".into())),
+            Ok(Err(_elapsed)) => {
+                tracing::warn!(
+                    target: "muagent::tool_executor",
+                    kind = "tool_timeout",
+                    run_id = %ctx.run_id,
+                    session_id = %ctx.session_id,
+                    turn = ctx.turn,
+                    call_id = %call.id,
+                    tool = %call.tool_name,
+                    timeout_ms = tool.descriptor().timeout.as_millis() as u64,
+                    "tool timed out"
+                );
+                ToolResult::err("timeout", true, Some("try smaller input".into()))
+            }
             Err(panic) => {
                 let msg = sanitize_panic(panic);
+                tracing::error!(
+                    target: "muagent::tool_executor",
+                    kind = "tool_panic",
+                    run_id = %ctx.run_id,
+                    session_id = %ctx.session_id,
+                    turn = ctx.turn,
+                    call_id = %call.id,
+                    tool = %call.tool_name,
+                    panic = %msg,
+                    "tool panicked"
+                );
                 ToolResult::err(format!("internal: {msg}"), true, None)
             }
         };
+        tracing::debug!(
+            target: "muagent::tool_executor",
+            kind = "tool_executor_end",
+            run_id = %ctx.run_id,
+            session_id = %ctx.session_id,
+            turn = ctx.turn,
+            call_id = %call.id,
+            tool = %call.tool_name,
+            ok = result.ok,
+            retryable = result.retryable,
+            output_chars = result.text().chars().count(),
+            "tool executor completed"
+        );
         Ok(enforce_max_out(result, tool.descriptor().max_out_tokens))
     }
 

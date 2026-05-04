@@ -279,6 +279,8 @@ fn exit_ok(out: crate::adapters::ExitOut) -> ToolOk {
         content: crate::core::types::Content::Text(content),
         detail: Some(json!({
             "exit": out.code,
+            "stdout_bytes": out.stdout.len() as u64,
+            "stderr_bytes": out.stderr.len() as u64,
             "truncated": out.truncated,
         })),
     }

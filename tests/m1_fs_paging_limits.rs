@@ -351,6 +351,33 @@ async fn sh_exec_sync_mode_still_times_out() {
 }
 
 #[tokio::test]
+async fn sh_exec_sync_returns_after_child_exit_even_if_descendant_holds_pipe() {
+    let root = tmp();
+    let reg = wire_with_sh(root);
+
+    let run = call(
+        reg,
+        "sh_exec",
+        json!({
+            "bin":"sh",
+            "args":["-c","printf done; sleep 2 &"],
+            "mode":"sync",
+            "timeout_ms":5000,
+        }),
+    );
+    let r = tokio::time::timeout(std::time::Duration::from_millis(1200), run)
+        .await
+        .expect("sh_exec should not wait for a pipe leaked into a background child");
+
+    assert!(r.ok, "{:?}", r);
+    assert_eq!(r.detail.as_ref().unwrap()["exit"], 0);
+    assert_eq!(r.detail.as_ref().unwrap()["stdout_bytes"], 4);
+    assert_eq!(r.detail.as_ref().unwrap()["stderr_bytes"], 0);
+    assert!(r.text().contains("exit 0"));
+    assert!(r.text().contains("done"));
+}
+
+#[tokio::test]
 async fn sh_exec_rejects_output_over_cap_without_buffering_all() {
     let root = tmp();
     let reg = wire_with_sh(root);

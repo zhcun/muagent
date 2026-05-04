@@ -42,7 +42,8 @@ crossterm = { version = "0.28", optional = true }
 ratatui = { version = "0.29", optional = true }
 tui-textarea = { version = "0.7", optional = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+flexi_logger = { version = "0.29", default-features = false }
 unicode-width = { version = "0.2", optional = true }
 
 [features]

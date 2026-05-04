@@ -158,6 +158,20 @@ impl Runner {
         // round's Ctrl-C should not stick).
         *self.cancel_lock() = CancelToken::new();
         let now = self.clock.now_ms();
+        let (content_chars, attachment_count) = message_content_stats(&msg);
+        tracing::info!(
+            target: "muagent::runner",
+            kind = "user_message_submit",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            step = state.step.name(),
+            turn = state.usage.turns,
+            event_seq = state.event_seq,
+            history_len = state.history.len(),
+            content_chars,
+            attachment_count,
+            "user message submitted"
+        );
         self.commit(state, |s| {
             s.push_message(msg);
             s.step = Step::Ready;
@@ -171,25 +185,67 @@ impl Runner {
 
     /// Run one FSM step.
     pub async fn step(&self, state: &mut RunState) -> Result<StepOutput, RuntimeError> {
+        let before_step = state.step.name();
+        tracing::debug!(
+            target: "muagent::runner",
+            kind = "step_start",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            step = before_step,
+            turn = state.usage.turns,
+            event_seq = state.event_seq,
+            "runner step started"
+        );
+
         // Cancel gate
-        if self.cancel_lock().triggered() && !state.step.is_terminal_or_paused() {
+        let result = if self.cancel_lock().triggered() && !state.step.is_terminal_or_paused() {
             let events = self.pause_host_requested(state).await?;
-            return Ok(StepOutput {
+            Ok(StepOutput {
                 events,
                 advanced: true,
-            });
-        }
+            })
+        } else {
+            match state.step.clone() {
+                Step::Ready => self.on_ready(state).await,
+                Step::ModelTurn => self.on_model_turn(state).await,
+                Step::ToolBatch { calls, cursor } => self.on_tool_batch(state, calls, cursor).await,
+                Step::ToolIntent { call, .. } => self.on_tool_intent_recover(state, call).await,
+                Step::Paused { .. } | Step::Done { .. } | Step::Failed { .. } => Ok(StepOutput {
+                    events: vec![],
+                    advanced: false,
+                }),
+            }
+        };
 
-        match state.step.clone() {
-            Step::Ready => self.on_ready(state).await,
-            Step::ModelTurn => self.on_model_turn(state).await,
-            Step::ToolBatch { calls, cursor } => self.on_tool_batch(state, calls, cursor).await,
-            Step::ToolIntent { call, .. } => self.on_tool_intent_recover(state, call).await,
-            Step::Paused { .. } | Step::Done { .. } | Step::Failed { .. } => Ok(StepOutput {
-                events: vec![],
-                advanced: false,
-            }),
+        match &result {
+            Ok(out) => tracing::debug!(
+                target: "muagent::runner",
+                kind = "step_end",
+                run_id = %state.run_id,
+                session_id = %state.session_id,
+                from_step = before_step,
+                to_step = state.step.name(),
+                turn = state.usage.turns,
+                event_seq = state.event_seq,
+                advanced = out.advanced,
+                event_count = out.events.len(),
+                "runner step completed"
+            ),
+            Err(e) => tracing::error!(
+                target: "muagent::runner",
+                kind = "step_error",
+                run_id = %state.run_id,
+                session_id = %state.session_id,
+                from_step = before_step,
+                current_step = state.step.name(),
+                turn = state.usage.turns,
+                event_seq = state.event_seq,
+                class = error_class_label(e.classify()),
+                error = %e,
+                "runner step failed"
+            ),
         }
+        result
     }
 
     async fn on_ready(&self, state: &mut RunState) -> Result<StepOutput, RuntimeError> {
@@ -212,7 +268,11 @@ impl Runner {
     /// Call the model with retry on transient / rate-limit errors.
     /// Other error classes (Auth, Fatal, InvalidRequest, Parse,
     /// ContextOverflow) surface immediately — retrying won't help.
-    async fn model_turn_with_retry(&self, req: ModelRequest) -> Result<ModelReply, RuntimeError> {
+    async fn model_turn_with_retry(
+        &self,
+        state: &RunState,
+        req: ModelRequest,
+    ) -> Result<ModelReply, RuntimeError> {
         let mut attempt: u32 = 1;
         let mut req = req;
         let mut added_empty_reply_continuation = false;
@@ -227,6 +287,24 @@ impl Runner {
             // execution so a panicking custom adapter surfaces as a
             // ModelError (transient, retryable) instead of unwinding
             // through the runner.
+            tracing::info!(
+                target: "muagent::model",
+                kind = "model_attempt_start",
+                run_id = %state.run_id,
+                session_id = %state.session_id,
+                turn = state.usage.turns.saturating_add(1),
+                attempt,
+                message_count = req.messages.len(),
+                tool_count = req.tools.len(),
+                system_chars = req.system.chars().count(),
+                runtime_context_chars = req.runtime_context.chars().count(),
+                cache = cache_policy_label(req.cache),
+                thinking_mode = thinking_mode_label(&req.thinking),
+                thinking_effort = thinking_effort_label(&req.thinking),
+                prompt_cache_key = req.prompt_cache_key.is_some(),
+                stream = req.stream,
+                "model attempt started"
+            );
             let turn_result = AssertUnwindSafe(self.model.turn(req.clone(), cancel))
                 .catch_unwind()
                 .await;
@@ -236,6 +314,10 @@ impl Runner {
                     let brief = panic_brief(panic);
                     tracing::error!(
                         target: "muagent::model",
+                        kind = "model_adapter_panic",
+                        run_id = %state.run_id,
+                        session_id = %state.session_id,
+                        turn = state.usage.turns.saturating_add(1),
                         attempt,
                         panic = %brief,
                         "model adapter panicked",
@@ -251,6 +333,10 @@ impl Runner {
                     let empty = model_reply_is_empty(&reply);
                     tracing::info!(
                         target: "muagent::model",
+                        kind = "model_attempt_end",
+                        run_id = %state.run_id,
+                        session_id = %state.session_id,
+                        turn = state.usage.turns.saturating_add(1),
                         attempt,
                         duration_ms,
                         prompt_tokens = reply.usage.prompt_tokens,
@@ -260,6 +346,7 @@ impl Runner {
                         thinking_tokens = reply.usage.thinking_tokens,
                         tool_calls = reply.tool_calls.len(),
                         text_chars = reply.text.chars().count(),
+                        thinking_artifacts = reply.thinking.len(),
                         empty,
                         "model turn completed"
                     );
@@ -271,6 +358,15 @@ impl Runner {
                         if !added_empty_reply_continuation
                             && history_ends_with_tool_result(&req.messages)
                         {
+                            tracing::warn!(
+                                target: "muagent::model",
+                                kind = "model_empty_response_repair",
+                                run_id = %state.run_id,
+                                session_id = %state.session_id,
+                                turn = state.usage.turns.saturating_add(1),
+                                attempt,
+                                "empty model response after tool result; adding continue prompt"
+                            );
                             req.messages.push(Message::User {
                                 content: Content::text("Please continue."),
                             });
@@ -278,6 +374,17 @@ impl Runner {
                         }
                         attempt += 1;
                         let wait = self.retry_policy.backoff_for(attempt, None);
+                        tracing::warn!(
+                            target: "muagent::model",
+                            kind = "model_retry_scheduled",
+                            run_id = %state.run_id,
+                            session_id = %state.session_id,
+                            turn = state.usage.turns.saturating_add(1),
+                            next_attempt = attempt,
+                            wait_ms = wait.as_millis() as u64,
+                            reason = "empty_response",
+                            "model retry scheduled"
+                        );
                         self.clock.sleep(wait).await;
                         continue;
                     }
@@ -287,6 +394,10 @@ impl Runner {
                     let duration_ms = (self.clock.now_ms() - attempt_start_ms).max(0);
                     tracing::info!(
                         target: "muagent::model",
+                        kind = "model_attempt_cancelled",
+                        run_id = %state.run_id,
+                        session_id = %state.session_id,
+                        turn = state.usage.turns.saturating_add(1),
                         attempt,
                         duration_ms,
                         "model turn cancelled"
@@ -302,6 +413,10 @@ impl Runner {
                     };
                     tracing::warn!(
                         target: "muagent::model",
+                        kind = "model_attempt_error",
+                        run_id = %state.run_id,
+                        session_id = %state.session_id,
+                        turn = state.usage.turns.saturating_add(1),
                         attempt,
                         duration_ms,
                         retryable,
@@ -315,6 +430,18 @@ impl Runner {
                     }
                     attempt += 1;
                     let wait = self.retry_policy.backoff_for(attempt, retry_after_ms);
+                    tracing::warn!(
+                        target: "muagent::model",
+                        kind = "model_retry_scheduled",
+                        run_id = %state.run_id,
+                        session_id = %state.session_id,
+                        turn = state.usage.turns.saturating_add(1),
+                        next_attempt = attempt,
+                        wait_ms = wait.as_millis() as u64,
+                        retry_after_ms,
+                        reason = "provider_error",
+                        "model retry scheduled"
+                    );
                     self.clock.sleep(wait).await;
                 }
             }
@@ -323,6 +450,16 @@ impl Runner {
 
     async fn on_model_turn(&self, state: &mut RunState) -> Result<StepOutput, RuntimeError> {
         let ats = self.fetch_active_tool_set(state).await;
+        tracing::debug!(
+            target: "muagent::runner",
+            kind = "active_tool_set_loaded",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            turn = state.usage.turns.saturating_add(1),
+            tool_count = ats.tools.len(),
+            prompt_block_count = ats.prompt_blocks.len(),
+            "active tool set loaded"
+        );
 
         // Cacheable system prefix: persona + capability hint + L1 blocks.
         // Runtime blocks (L2 day-level facts) are added later, after
@@ -342,7 +479,7 @@ impl Runner {
 
         let req = self.assemble_request(state, system, tools, &prompt_blocks);
 
-        let reply = match self.model_turn_with_retry(req).await {
+        let reply = match self.model_turn_with_retry(state, req).await {
             Ok(reply) => reply,
             Err(RuntimeError::Cancelled) => return self.pause_with(state, pre_events).await,
             Err(RuntimeError::Store(e)) => return Err(RuntimeError::Store(e)),
@@ -401,6 +538,18 @@ impl Runner {
         let cancel = self.cancel_lock().child();
         match c.maybe_compact(&mut candidate, system, cancel).await {
             Ok(Some(ev)) => {
+                tracing::info!(
+                    target: "muagent::compaction",
+                    kind = "history_compacted",
+                    run_id = %state.run_id,
+                    session_id = %state.session_id,
+                    turn = state.usage.turns.saturating_add(1),
+                    replaced_turns = ev.replaced_turns,
+                    replaced_messages = ev.replaced_messages,
+                    saved_tokens_estimate = ev.saved_tokens_estimate,
+                    checkpoint_id = ev.checkpoint_id.as_deref().unwrap_or(""),
+                    "history compacted"
+                );
                 let compacted_history = candidate.history;
                 let compacted_history_ids = candidate.history_ids;
                 let compacted_next_message_seq = candidate.next_message_seq;
@@ -442,6 +591,10 @@ impl Runner {
             Err(e) => {
                 tracing::warn!(
                     target: "muagent::compaction",
+                    kind = "history_compaction_error",
+                    run_id = %state.run_id,
+                    session_id = %state.session_id,
+                    turn = state.usage.turns.saturating_add(1),
                     error = %e,
                     class = error_class_label(e.classify()),
                     "auto-compaction failed; continuing without compaction"
@@ -515,49 +668,67 @@ impl Runner {
         let text = reply.text;
         let thinking = reply.thinking;
         let tool_calls = reply.tool_calls;
-        self.commit(state, move |s| {
-            s.usage.tokens_prompt = s.usage.tokens_prompt.saturating_add(usage.prompt_tokens);
-            s.usage.tokens_completion = s
-                .usage
-                .tokens_completion
-                .saturating_add(usage.completion_tokens);
-            s.usage.cost_usd += usage.cost_usd.unwrap_or(0.0);
-            s.usage.turns = s.usage.turns.saturating_add(1);
-            s.usage.tokens_cache_read = s
-                .usage
-                .tokens_cache_read
-                .saturating_add(usage.cache_read_tokens);
-            s.usage.tokens_cache_write = s
-                .usage
-                .tokens_cache_write
-                .saturating_add(usage.cache_write_tokens);
-            s.usage.tokens_thinking = s
-                .usage
-                .tokens_thinking
-                .saturating_add(usage.thinking_tokens);
+        let text_chars = text.chars().count();
+        let thinking_count = thinking.len();
+        let tool_call_count = tool_calls.len();
+        let events = self
+            .commit(state, move |s| {
+                s.usage.tokens_prompt = s.usage.tokens_prompt.saturating_add(usage.prompt_tokens);
+                s.usage.tokens_completion = s
+                    .usage
+                    .tokens_completion
+                    .saturating_add(usage.completion_tokens);
+                s.usage.cost_usd += usage.cost_usd.unwrap_or(0.0);
+                s.usage.turns = s.usage.turns.saturating_add(1);
+                s.usage.tokens_cache_read = s
+                    .usage
+                    .tokens_cache_read
+                    .saturating_add(usage.cache_read_tokens);
+                s.usage.tokens_cache_write = s
+                    .usage
+                    .tokens_cache_write
+                    .saturating_add(usage.cache_write_tokens);
+                s.usage.tokens_thinking = s
+                    .usage
+                    .tokens_thinking
+                    .saturating_add(usage.thinking_tokens);
 
-            s.push_assistant_with_thinking(&text, tool_calls.clone(), thinking);
-            let asst_seq = s.next_seq();
-            let mut events = vec![Event::AssistantMessage {
-                text: text.clone(),
-                seq: asst_seq,
-            }];
-            if tool_calls.is_empty() {
-                s.step = Step::Done { final_text: text };
-                let end_seq = s.next_seq();
-                events.push(Event::SessionEnd {
-                    ok: true,
-                    seq: end_seq,
-                });
-            } else {
-                s.step = Step::ToolBatch {
-                    calls: tool_calls,
-                    cursor: 0,
-                };
-            }
-            events
-        })
-        .await
+                s.push_assistant_with_thinking(&text, tool_calls.clone(), thinking);
+                let asst_seq = s.next_seq();
+                let mut events = vec![Event::AssistantMessage {
+                    text: text.clone(),
+                    seq: asst_seq,
+                }];
+                if tool_calls.is_empty() {
+                    s.step = Step::Done { final_text: text };
+                    let end_seq = s.next_seq();
+                    events.push(Event::SessionEnd {
+                        ok: true,
+                        seq: end_seq,
+                    });
+                } else {
+                    s.step = Step::ToolBatch {
+                        calls: tool_calls,
+                        cursor: 0,
+                    };
+                }
+                events
+            })
+            .await?;
+        tracing::info!(
+            target: "muagent::runner",
+            kind = "assistant_message_commit",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            turn = state.usage.turns,
+            event_seq = state.event_seq,
+            text_chars,
+            tool_calls = tool_call_count,
+            thinking_artifacts = thinking_count,
+            done = tool_call_count == 0,
+            "assistant message committed"
+        );
+        Ok(events)
     }
 
     /// Append a `Paused { HostRequested }` transition to the supplied
@@ -577,6 +748,17 @@ impl Runner {
 
     async fn pause_host_requested(&self, state: &mut RunState) -> Result<Vec<Event>, RuntimeError> {
         let now = self.clock.now_ms();
+        tracing::info!(
+            target: "muagent::runner",
+            kind = "run_paused",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            step = state.step.name(),
+            turn = state.usage.turns,
+            event_seq = state.event_seq,
+            reason = "host_requested",
+            "run paused"
+        );
         self.commit(state, |s| {
             s.step = Step::Paused {
                 reason: PauseReason::HostRequested,
@@ -600,6 +782,18 @@ impl Runner {
         let brief = error_brief(&err, 500);
         let reason = brief.clone();
         let now = self.clock.now_ms();
+        tracing::error!(
+            target: "muagent::runner",
+            kind = "run_failed",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            step = state.step.name(),
+            turn = state.usage.turns,
+            event_seq = state.event_seq,
+            class = %class,
+            error = %brief,
+            "run failed"
+        );
         self.commit(state, move |s| {
             s.step = Step::Failed { reason };
             s.updated_ms = now;
@@ -663,6 +857,16 @@ impl Runner {
         if idem == Idempotency::AtMostOnce {
             let now = self.clock.now_ms();
             let call_for_intent = call.clone();
+            tracing::warn!(
+                target: "muagent::tool",
+                kind = "tool_intent_persist",
+                run_id = %state.run_id,
+                session_id = %state.session_id,
+                turn = state.usage.turns,
+                call_id = %call.id,
+                tool = %call.tool_name,
+                "at-most-once tool intent persisted before execution"
+            );
             self.commit(state, |s| {
                 s.step = Step::ToolIntent {
                     call: call_for_intent,
@@ -682,6 +886,27 @@ impl Runner {
             run_id: state.run_id,
             turn: state.usage.turns,
         };
+        let side_effects = if call.tool_name == TOOL_PROTOCOL_ERROR_TOOL {
+            SideEffects::ReadOnly
+        } else {
+            self.tools.side_effects_for(&call)
+        };
+        tracing::info!(
+            target: "muagent::tool",
+            kind = "tool_call_start",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            turn = state.usage.turns,
+            call_id = %call.id,
+            tool = %call.tool_name,
+            cursor,
+            batch_len = calls.len(),
+            idempotency = idempotency_label(idem),
+            side_effects = %side_effects_label(side_effects),
+            args_hash = %call.args_hash,
+            args_sanitized = %crate::core::sanitize::sanitize_json(call.args.clone()),
+            "tool call started"
+        );
         let start_ms = self.clock.now_ms();
         let result = match internal_result {
             Some(result) => result,
@@ -694,6 +919,26 @@ impl Runner {
             }
         };
         let duration_ms = (self.clock.now_ms() - start_ms).max(0) as u32;
+        let result_text = result.text();
+        tracing::info!(
+            target: "muagent::tool",
+            kind = "tool_call_end",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            turn = state.usage.turns,
+            call_id = %call.id,
+            tool = %call.tool_name,
+            cursor,
+            batch_len = calls.len(),
+            ok = result.ok,
+            retryable = result.retryable,
+            duration_ms,
+            output_chars = result_text.chars().count(),
+            attachment_count = result.attachments().count(),
+            has_detail = result.detail.is_some(),
+            brief = %result.brief(),
+            "tool call completed"
+        );
 
         // Audit write. Best-effort: a store error here must not abort the
         // turn (audit is observability, not correctness), but we DO surface
@@ -704,11 +949,7 @@ impl Runner {
             run_id: state.run_id,
             call_id: call.id.clone(),
             tool_name: call.tool_name.clone(),
-            side_effects: side_effects_label(if call.tool_name == TOOL_PROTOCOL_ERROR_TOOL {
-                SideEffects::ReadOnly
-            } else {
-                self.tools.side_effects_for(&call)
-            }),
+            side_effects: side_effects_label(side_effects),
             ok: result.ok,
             retryable: result.retryable,
             args_hash: call.args_hash.clone(),
@@ -780,7 +1021,17 @@ impl Runner {
         // All mutation + event emission inside one transactional commit so
         // a persist failure leaves us in the original ToolIntent state and
         // the next step retries cleanly.
-        let recover_id = call.id;
+        let recover_id = call.id.clone();
+        tracing::warn!(
+            target: "muagent::tool",
+            kind = "tool_intent_recovered",
+            run_id = %state.run_id,
+            session_id = %state.session_id,
+            turn = state.usage.turns,
+            call_id = %recover_id,
+            tool = %call.tool_name,
+            "recovering interrupted at-most-once tool intent"
+        );
         let events = self
             .commit(state, |s| {
                 let r = ToolResult::err(
@@ -877,9 +1128,41 @@ impl Runner {
                 ))));
             }
         }
+        let event_count = events.len();
+        let first_seq = events.first().map(Event::seq).unwrap_or(0);
+        let last_seq = events.last().map(Event::seq).unwrap_or(0);
         match self.store.save_delta(state, &events).await {
-            Ok(()) => Ok(events),
+            Ok(()) => {
+                tracing::debug!(
+                    target: "muagent::store",
+                    kind = "save_delta_ok",
+                    run_id = %state.run_id,
+                    session_id = %state.session_id,
+                    step = state.step.name(),
+                    turn = state.usage.turns,
+                    event_seq = state.event_seq,
+                    event_count,
+                    first_seq,
+                    last_seq,
+                    "state delta saved"
+                );
+                Ok(events)
+            }
             Err(e) => {
+                tracing::error!(
+                    target: "muagent::store",
+                    kind = "save_delta_error",
+                    run_id = %state.run_id,
+                    session_id = %state.session_id,
+                    step = state.step.name(),
+                    turn = state.usage.turns,
+                    event_seq = state.event_seq,
+                    event_count,
+                    first_seq,
+                    last_seq,
+                    error = %e,
+                    "state delta save failed; rolling back in-memory state"
+                );
                 snap.restore(state);
                 Err(RuntimeError::Store(e))
             }
@@ -898,9 +1181,7 @@ fn validate_event_seq(events: &[Event]) -> Result<(), String> {
         let seq = ev.seq();
         if let Some(prev) = last {
             if seq <= prev {
-                return Err(format!(
-                    "non-monotonic event seq: prev={prev} next={seq}"
-                ));
+                return Err(format!("non-monotonic event seq: prev={prev} next={seq}"));
             }
         }
         last = Some(seq);
@@ -957,6 +1238,70 @@ fn model_reply_is_empty(reply: &ModelReply) -> bool {
 
 fn history_ends_with_tool_result(messages: &[Message]) -> bool {
     matches!(messages.last(), Some(Message::ToolResult { .. }))
+}
+
+fn message_content_stats(msg: &Message) -> (usize, usize) {
+    match msg {
+        Message::System { content }
+        | Message::User { content }
+        | Message::Assistant { content, .. } => content_stats(content),
+        Message::ToolResult { result, .. } => content_stats(&result.content),
+        Message::Observation { text, .. } => (text.chars().count(), 0),
+    }
+}
+
+fn content_stats(content: &Content) -> (usize, usize) {
+    match content {
+        Content::Text(text) => (text.chars().count(), 0),
+        Content::Parts(parts) => {
+            let mut chars = 0;
+            let mut attachments = 0;
+            for part in parts {
+                match part {
+                    crate::core::types::ContentPart::Text { text } => {
+                        chars += text.chars().count();
+                    }
+                    crate::core::types::ContentPart::Image { .. }
+                    | crate::core::types::ContentPart::Data { .. } => attachments += 1,
+                }
+            }
+            (chars, attachments)
+        }
+    }
+}
+
+fn cache_policy_label(policy: CachePolicy) -> &'static str {
+    match policy {
+        CachePolicy::Disabled => "disabled",
+        CachePolicy::Auto => "auto",
+    }
+}
+
+fn thinking_mode_label(config: &ThinkingConfig) -> &'static str {
+    match config.mode {
+        crate::core::thinking::ThinkingMode::Off => "off",
+        crate::core::thinking::ThinkingMode::Auto => "auto",
+        crate::core::thinking::ThinkingMode::Enabled => "enabled",
+    }
+}
+
+fn thinking_effort_label(config: &ThinkingConfig) -> &'static str {
+    match config.effort {
+        Some(crate::core::thinking::ThinkingEffort::Minimal) => "minimal",
+        Some(crate::core::thinking::ThinkingEffort::Low) => "low",
+        Some(crate::core::thinking::ThinkingEffort::Medium) => "medium",
+        Some(crate::core::thinking::ThinkingEffort::High) => "high",
+        Some(crate::core::thinking::ThinkingEffort::Max) => "max",
+        None => "none",
+    }
+}
+
+fn idempotency_label(idem: Idempotency) -> &'static str {
+    match idem {
+        Idempotency::Idempotent => "idempotent",
+        Idempotency::AtMostOnce => "at_most_once",
+        Idempotency::AtLeastOnce => "at_least_once",
+    }
 }
 
 fn internal_tool_result(call: &PendingCall) -> Option<ToolResult> {
@@ -1137,8 +1482,14 @@ mod tests {
     #[test]
     fn validate_event_seq_accepts_strict_monotonic() {
         let evs = vec![
-            Event::StepAdvanced { to: "a".into(), seq: 1 },
-            Event::StepAdvanced { to: "b".into(), seq: 2 },
+            Event::StepAdvanced {
+                to: "a".into(),
+                seq: 1,
+            },
+            Event::StepAdvanced {
+                to: "b".into(),
+                seq: 2,
+            },
             Event::SessionEnd { ok: true, seq: 3 },
         ];
         assert!(validate_event_seq(&evs).is_ok());
@@ -1147,8 +1498,14 @@ mod tests {
     #[test]
     fn validate_event_seq_rejects_duplicate() {
         let evs = vec![
-            Event::StepAdvanced { to: "a".into(), seq: 1 },
-            Event::StepAdvanced { to: "b".into(), seq: 1 },
+            Event::StepAdvanced {
+                to: "a".into(),
+                seq: 1,
+            },
+            Event::StepAdvanced {
+                to: "b".into(),
+                seq: 1,
+            },
         ];
         assert!(validate_event_seq(&evs).is_err());
     }
@@ -1156,8 +1513,14 @@ mod tests {
     #[test]
     fn validate_event_seq_rejects_decreasing() {
         let evs = vec![
-            Event::StepAdvanced { to: "a".into(), seq: 5 },
-            Event::StepAdvanced { to: "b".into(), seq: 3 },
+            Event::StepAdvanced {
+                to: "a".into(),
+                seq: 5,
+            },
+            Event::StepAdvanced {
+                to: "b".into(),
+                seq: 3,
+            },
         ];
         assert!(validate_event_seq(&evs).is_err());
     }
