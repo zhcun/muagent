@@ -10,7 +10,7 @@ fn app() -> TuiApp {
     TuiApp::new(TuiConfig {
         provider: "openrouter".into(),
         model: "openai/gpt-test".into(),
-        store: "memory".into(),
+        effort: "high".into(),
         root: ".".into(),
     })
 }
@@ -537,6 +537,28 @@ fn render_snapshot_shows_footer_and_paste_summary() {
     assert!(screen.contains("sh 1"), "{screen}");
     assert!(screen.contains("Ctrl-B"), "{screen}");
     assert!(screen.contains("Enter"), "{screen}");
+}
+
+#[test]
+fn header_prioritizes_workspace_path() {
+    let app = TuiApp::new(TuiConfig {
+        provider: "openrouter".into(),
+        model: "openai/gpt-test".into(),
+        effort: "high".into(),
+        root: "/home/zhangcun631/projects/muagent".into(),
+    });
+    let screen = render_text(&app, 120, 12);
+    let header = screen.lines().next().unwrap_or("");
+
+    assert!(
+        header.contains("/home/zhangcun631/projects/muagent"),
+        "{screen}"
+    );
+    assert!(header.contains("openai/gpt-test"), "{screen}");
+    assert!(header.contains("high"), "{screen}");
+    assert!(header.contains("openrouter"), "{screen}");
+    assert!(!header.contains("memory"), "{screen}");
+    assert!(!header.contains("jsonl:"), "{screen}");
 }
 
 #[test]

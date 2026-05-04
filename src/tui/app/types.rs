@@ -9,7 +9,7 @@ use super::super::style::paste_line_count;
 pub struct TuiConfig {
     pub provider: String,
     pub model: String,
-    pub store: String,
+    pub effort: String,
     pub root: String,
 }
 

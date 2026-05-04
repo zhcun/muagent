@@ -115,9 +115,15 @@ impl TuiApp {
         self.last_prompt_tokens = tokens;
     }
 
-    pub fn set_runtime(&mut self, provider: impl Into<String>, model: impl Into<String>) {
+    pub fn set_runtime(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        effort: impl Into<String>,
+    ) {
         self.config.provider = provider.into();
         self.config.model = model.into();
+        self.config.effort = effort.into();
     }
 
     pub fn set_status(&mut self, status: impl Into<String>) {

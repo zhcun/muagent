@@ -23,9 +23,10 @@ use crate::cli_app::commands::{handle, CmdAction};
 use crate::cli_app::doctor::{config_doctor_report, model_setup_hints};
 use crate::cli_app::driver::{submit_and_drive_with_updates, TuiUpdate};
 use crate::cli_app::tui_helpers::{
-    provider_label, seed_tui_history_messages, seed_tui_input_history, sync_tui_runtime, TuiAppSink,
+    provider_label, seed_tui_history_messages, seed_tui_input_history, sync_tui_runtime,
+    thinking_label, TuiAppSink,
 };
-use crate::cli_app::{store_label, truncate, ReplRuntime, TUI_MAX_QUEUED_SUBMISSIONS};
+use crate::cli_app::{truncate, ReplRuntime, TUI_MAX_QUEUED_SUBMISSIONS};
 use crate::config::{Config, ConfigOverrides};
 use crate::core::clock::SystemClock;
 use crate::core::run_state::RunState;
@@ -568,7 +569,7 @@ fn tui_config(cfg: &Config) -> TuiConfig {
     TuiConfig {
         provider: provider_label(&cfg.model.provider),
         model: cfg.model.model.clone(),
-        store: store_label(cfg),
+        effort: thinking_label(cfg.runtime.thinking_mode, cfg.runtime.thinking_effort),
         root: cfg.fs.root.display().to_string(),
     }
 }

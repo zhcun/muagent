@@ -4,6 +4,7 @@
 
 use crate::cli_app::sink::{render_help, CommandSink, SessionResetKind};
 use crate::cli_app::{content_text, ReplRuntime};
+use crate::config::{EffortCfg, ThinkingModeCfg};
 use crate::core::run_state::RunState;
 use crate::core::types::{Content, Message};
 use crate::tui::TuiApp;
@@ -77,9 +78,26 @@ pub fn sync_tui_runtime(app: &mut TuiApp, runtime: &ReplRuntime) {
     app.set_runtime(
         provider_label(&runtime.cfg.model.provider),
         runtime.cfg.model.model.clone(),
+        thinking_label(
+            runtime.cfg.runtime.thinking_mode,
+            runtime.cfg.runtime.thinking_effort,
+        ),
     );
     app.set_context_window(runtime.cfg.model.capabilities.ctx_len);
     app.set_last_prompt_tokens(0);
+}
+
+pub fn thinking_label(mode: ThinkingModeCfg, effort: Option<EffortCfg>) -> String {
+    match (mode, effort) {
+        (ThinkingModeCfg::Off, _) => "off".into(),
+        (ThinkingModeCfg::Auto, _) => "auto".into(),
+        (ThinkingModeCfg::Enabled, Some(EffortCfg::Minimal)) => "minimal".into(),
+        (ThinkingModeCfg::Enabled, Some(EffortCfg::Low)) => "low".into(),
+        (ThinkingModeCfg::Enabled, Some(EffortCfg::Medium)) => "medium".into(),
+        (ThinkingModeCfg::Enabled, Some(EffortCfg::High)) => "high".into(),
+        (ThinkingModeCfg::Enabled, Some(EffortCfg::Max)) => "max".into(),
+        (ThinkingModeCfg::Enabled, None) => "on".into(),
+    }
 }
 
 pub fn provider_label(provider: &impl std::fmt::Debug) -> String {

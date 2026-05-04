@@ -80,19 +80,6 @@ fn compact_token_label(tokens: u32) -> String {
     }
 }
 
-fn compact_model_label_for_width(model: &str, terminal_width: usize) -> String {
-    let max = if terminal_width >= 120 {
-        48
-    } else if terminal_width >= 90 {
-        34
-    } else if terminal_width >= 70 {
-        24
-    } else {
-        16
-    };
-    one_line(model, max)
-}
-
 fn composer_block(disabled: bool) -> Block<'static> {
     let border_style = if disabled {
         Style::default()
@@ -245,6 +232,26 @@ impl TuiApp {
 
     fn header_line(&self, width: u16) -> Line<'static> {
         let width = width as usize;
+        let show_provider = width >= 72;
+        let provider_width = if show_provider {
+            UnicodeWidthStr::width(self.config.provider.as_str()) + 3
+        } else {
+            0
+        };
+        let effort_width = UnicodeWidthStr::width(self.config.effort.as_str());
+        let model_budget = if width >= 120 {
+            42
+        } else if width >= 90 {
+            30
+        } else {
+            20
+        };
+        let fixed_width = UnicodeWidthStr::width("μAgent") + effort_width + provider_width + 9;
+        let workspace_budget = width
+            .saturating_sub(fixed_width)
+            .saturating_sub(model_budget)
+            .clamp(8, 44);
+
         let mut left = vec![
             Span::styled(
                 "μAgent",
@@ -254,30 +261,31 @@ impl TuiApp {
             ),
             dim_dot_separator(),
             Span::styled(
-                compact_model_label_for_width(&self.config.model, width),
+                compact_workspace_label(&self.config.root, workspace_budget),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            dim_dot_separator(),
+            Span::styled(
+                one_line(&self.config.model, model_budget),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             dim_dot_separator(),
             Span::styled(
-                self.config.provider.clone(),
-                Style::default().fg(Color::Blue),
+                self.config.effort.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
         ];
-
-        if width >= 72 {
+        if show_provider {
             left.push(dim_dot_separator());
             left.push(Span::styled(
-                self.config.store.clone(),
-                Style::default().fg(Color::Green),
-            ));
-        }
-        if width >= 92 {
-            left.push(dim_dot_separator());
-            left.push(Span::styled(
-                compact_root_label(&self.config.root),
-                Style::default().fg(Color::DarkGray),
+                self.config.provider.clone(),
+                Style::default().fg(Color::Blue),
             ));
         }
 
@@ -966,15 +974,43 @@ fn title_case_status(status: &str) -> String {
     out.replace('_', " ")
 }
 
-fn compact_root_label(root: &str) -> String {
-    let trimmed = root.trim_end_matches('/');
-    let leaf = trimmed
-        .rsplit('/')
-        .find(|part| !part.is_empty())
-        .unwrap_or(trimmed);
-    if leaf.is_empty() {
-        "/".into()
-    } else {
-        one_line(leaf, 32)
+fn compact_workspace_label(root: &str, max_chars: usize) -> String {
+    let root = shorten_home(root);
+    if root.chars().count() <= max_chars {
+        return root;
     }
+    compact_root_label(&root, max_chars)
+}
+
+fn shorten_home(root: &str) -> String {
+    let Some(home) = std::env::var_os("HOME").and_then(|home| home.into_string().ok()) else {
+        return root.to_string();
+    };
+    if home == "/" || !root.starts_with(&home) {
+        return root.to_string();
+    }
+    match root.strip_prefix(&home) {
+        Some("") => "~".into(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => root.to_string(),
+    }
+}
+
+fn compact_root_label(root: &str, max_chars: usize) -> String {
+    let trimmed = root.trim_end_matches('/');
+    let parts = trimmed
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != "~")
+        .collect::<Vec<_>>();
+    let leaf = parts.last().copied().unwrap_or(trimmed);
+    if leaf.is_empty() {
+        return "/".into();
+    }
+    if parts.len() >= 2 {
+        let candidate = format!(".../{}/{}", parts[parts.len() - 2], leaf);
+        if candidate.chars().count() <= max_chars {
+            return candidate;
+        }
+    }
+    one_line(&format!(".../{leaf}"), max_chars)
 }
