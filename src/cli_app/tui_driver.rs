@@ -427,12 +427,16 @@ fn drain_tui_run_updates(run: Option<&mut TuiInflightRun>, app: &mut TuiApp) {
             TuiUpdate::Assistant(text) => app.add_assistant(text),
             TuiUpdate::PromptTokens(tokens) => app.set_last_prompt_tokens(tokens),
             TuiUpdate::Tokens(delta) => app.add_turn_tokens(delta),
+            TuiUpdate::ToolStart { call_id, display } => {
+                app.add_tool_call_started(call_id, display)
+            }
             TuiUpdate::Tool {
+                call_id,
                 display,
                 ok,
                 brief,
                 extra,
-            } => app.add_tool_call(display, ok, brief, extra),
+            } => app.finish_tool_call(call_id, display, ok, brief, extra),
         }
     }
 }

@@ -29,11 +29,16 @@ pub enum TuiUpdate {
     /// Per-step token delta (prompt + completion). The TUI accumulates these
     /// into the in-flight turn counter shown next to the spinner.
     Tokens(u32),
-    /// One completed tool call rendered as a chat row. Built by pairing the
-    /// preceding `Event::ToolCallStart` (carries args) with `ToolCallEnd`
-    /// (carries ok / brief / detail), since the runner emits them together.
+    /// A tool call that is about to execute. Emitted before awaiting the
+    /// runner step so long-running sh/fs work is visible immediately.
+    ToolStart {
+        call_id: String,
+        display: String,
+    },
+    /// One completed tool call rendered by updating the matching running row.
     /// `extra` is an optional second-line continuation (e.g. `+3 -1`).
     Tool {
+        call_id: String,
         display: String,
         ok: bool,
         brief: String,
@@ -110,6 +115,7 @@ pub async fn drive_until_terminal_with_updates(
             return Ok(());
         }
         send_tui_activity(&updates, step_activity_label(&state.step));
+        emit_running_tool_start(&updates, &state.step);
         let prompt_before = state.usage.tokens_prompt;
         let completion_before = state.usage.tokens_completion;
         let out = runner.step(state).await.map_err(|e| {
@@ -130,6 +136,24 @@ pub async fn drive_until_terminal_with_updates(
         "hit step budget without reaching terminal state; step={:?}",
         state.step
     ))
+}
+
+fn emit_running_tool_start(updates: &Option<mpsc::UnboundedSender<TuiUpdate>>, step: &Step) {
+    let Step::ToolBatch { calls, cursor } = step else {
+        return;
+    };
+    let Some(call) = calls.get(*cursor) else {
+        return;
+    };
+    let display = tool_display_label(&call.tool_name, &call.args);
+    send_tui_update(
+        updates,
+        TuiUpdate::ToolStart {
+            call_id: call.id.clone(),
+            display: display.clone(),
+        },
+    );
+    send_tui_activity(updates, format!("Running {display}"));
 }
 
 fn step_activity_label(step: &Step) -> &'static str {
@@ -215,14 +239,16 @@ fn process_step_events(
         log_event(ev);
         match ev {
             Event::ToolCallStart { tool, args, .. } => {
-                let display = tool_display_label(tool, args);
                 pending_tool = Some((tool.clone(), args.clone()));
-                send_tui_activity(updates, format!("Running {display}"));
             }
             Event::ToolCallEnd {
-                ok, brief, detail, ..
+                call_id,
+                ok,
+                brief,
+                detail,
+                ..
             } => {
-                emit_tool_call_end(updates, pending_tool.take(), *ok, brief, detail);
+                emit_tool_call_end(updates, pending_tool.take(), call_id, *ok, brief, detail);
             }
             _ => {
                 for update in event_tui_updates(ev) {
@@ -248,6 +274,7 @@ fn process_step_events(
 fn emit_tool_call_end(
     updates: &Option<mpsc::UnboundedSender<TuiUpdate>>,
     pending: Option<(String, serde_json::Value)>,
+    call_id: &str,
     ok: bool,
     brief: &str,
     detail: &serde_json::Value,
@@ -262,6 +289,7 @@ fn emit_tool_call_end(
     send_tui_update(
         updates,
         TuiUpdate::Tool {
+            call_id: call_id.to_string(),
             display: display.clone(),
             ok,
             brief: brief.to_string(),

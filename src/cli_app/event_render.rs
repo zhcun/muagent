@@ -10,9 +10,9 @@ use crate::core::event::Event;
 
 pub fn event_tui_updates(ev: &Event) -> Vec<TuiUpdate> {
     match ev {
-        // ToolCallStart / End are paired into a single TuiUpdate::Tool by
-        // the calling loop in `drive_until_terminal_with_updates`, since
-        // the chat row needs args (from Start) plus ok/brief (from End).
+        // ToolCallStart / End are handled by `drive_until_terminal_with_updates`.
+        // The driver sends ToolStart before awaiting the step, then uses End
+        // to update that running row with ok/brief/detail.
         Event::ToolCallStart { .. } | Event::ToolCallEnd { .. } => vec![],
         Event::StepAdvanced { to, .. } => vec![TuiUpdate::Activity(stage_label(to).into())],
         Event::AssistantMessage { text, .. } => {
@@ -88,7 +88,14 @@ pub fn tool_display_label(tool: &str, args: &serde_json::Value) -> String {
         "fs_list" => ("List", file_arg_label(args, "uri")),
         "fs_stat" => ("Stat", file_arg_label(args, "uri")),
         "fs_delete" => ("Delete", file_arg_label(args, "uri")),
-        "fs_rename" => ("Rename", format!("{} → {}", s(args, "from"), s(args, "to"))),
+        "fs_rename" => (
+            "Rename",
+            format!(
+                "{} → {}",
+                display_file_uri(&s(args, "from")),
+                display_file_uri(&s(args, "to"))
+            ),
+        ),
         other => {
             let fallback = generic_args_label(args);
             return if fallback.is_empty() {
@@ -111,7 +118,21 @@ fn stage_label(to: &str) -> &'static str {
 }
 
 fn file_arg_label(args: &Value, key: &str) -> String {
-    one_line(args.get(key).and_then(Value::as_str).unwrap_or(""), 96)
+    one_line(
+        &display_file_uri(args.get(key).and_then(Value::as_str).unwrap_or("")),
+        96,
+    )
+}
+
+fn display_file_uri(raw: &str) -> String {
+    let Some(rest) = raw.strip_prefix("file://") else {
+        return raw.to_string();
+    };
+    if let Some(localhost) = rest.strip_prefix("localhost/") {
+        format!("/{localhost}")
+    } else {
+        rest.to_string()
+    }
 }
 
 fn sh_exec_args_label(args: &Value) -> String {
@@ -237,7 +258,7 @@ mod tests {
                 "fs_read",
                 &json!({"uri":"file:///tmp/project/src/main.rs","max_bytes":1000})
             ),
-            "Read(file:///tmp/project/src/main.rs)"
+            "Read(/tmp/project/src/main.rs)"
         );
         assert_eq!(
             tool_display_label(
@@ -255,14 +276,14 @@ mod tests {
                 "fs_write",
                 &json!({"uri":"file:///tmp/a.txt","content":"hello","append":true})
             ),
-            "Write(file:///tmp/a.txt; append; 5 bytes)"
+            "Write(/tmp/a.txt; append; 5 bytes)"
         );
         assert_eq!(
             tool_display_label(
                 "fs_edit",
                 &json!({"uri":"file:///tmp/a.txt","edits":[{"old_text":"a","new_text":"b"}],"dry_run":true})
             ),
-            "Update(file:///tmp/a.txt; 1 edit; dry-run)"
+            "Update(/tmp/a.txt; 1 edit; dry-run)"
         );
     }
 

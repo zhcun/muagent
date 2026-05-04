@@ -446,6 +446,9 @@ impl TuiApp {
     /// `!entries.is_empty()` — folded into one walk so handlers don't
     /// iterate `REPL_COMMANDS` twice per keypress.
     pub(super) fn slash_popup_entries(&self) -> Vec<(&'static str, &'static str)> {
+        if self.history_cursor.is_some() {
+            return Vec::new();
+        }
         if self.slash_popup_suppressed {
             return Vec::new();
         }

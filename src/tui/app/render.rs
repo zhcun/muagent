@@ -16,13 +16,13 @@ use super::super::style::{
     dim_dot_separator, format_bytes, format_chars, format_elapsed, format_turn_meta,
     job_state_label, job_state_style, one_line, plural, push_code_block_line, push_code_fence_rule,
     push_wrapped_message_line, role_body_style, role_style, selected_window_start,
-    spinner_frame_at, status_color, status_dot, text_lines,
+    spinner_frame_at, text_lines,
 };
 use super::super::ChatRole;
 use super::types::TuiPanel;
 use super::TuiApp;
 
-/// Build the `[████░░░░] 32% / 128k` fill bar shown in the header.
+/// Build the `[████░░░░] 32% / 128k` fill bar shown in the footer.
 /// Color shifts yellow above 80% and red above 95% to flag context pressure
 /// before the user hits a hard limit.
 fn context_bar_spans(used: u32, max: u32) -> Vec<Span<'static>> {
@@ -78,13 +78,6 @@ fn compact_token_label(tokens: u32) -> String {
     } else {
         tokens.to_string()
     }
-}
-
-fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans
-        .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-        .sum()
 }
 
 fn compact_model_label_for_width(model: &str, terminal_width: usize) -> String {
@@ -205,16 +198,27 @@ impl TuiApp {
         // Mouse capture is intentionally left off so terminal selection/copy
         // stays native.
         let help = self.footer_help_text();
-        let mut spans = self.render_status_indicator();
-        if !self.sh_jobs.is_empty() {
-            spans.push(dim_dot_separator());
-            spans.extend(status_dot(self.sh_job_status_text(), Color::Yellow));
+        let mut spans = self.footer_context_spans();
+        if self.running_sh_job_count() > 0 {
+            if !spans.is_empty() {
+                spans.push(dim_dot_separator());
+            }
+            spans.push(Span::styled(
+                self.sh_job_status_text(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
         if self.queue_len > 0 {
-            spans.push(dim_dot_separator());
+            if !spans.is_empty() {
+                spans.push(dim_dot_separator());
+            }
             spans.extend(self.queue_footer_spans());
         }
-        spans.push(dim_dot_separator());
+        if !spans.is_empty() {
+            spans.push(dim_dot_separator());
+        }
         let help_style = if submit_blocked_by_queue {
             Style::default()
                 .fg(Color::DarkGray)
@@ -231,14 +235,8 @@ impl TuiApp {
         self.render_slash_popup(frame, chunks[1], chunks[3]);
     }
 
-    fn has_visible_activity(&self) -> bool {
-        self.activity
-            .iter()
-            .any(|entry| !is_low_signal_activity(entry))
-    }
-
     fn should_show_activity_row(&self) -> bool {
-        self.status != "idle" || self.has_visible_activity()
+        self.status != "idle"
     }
 
     fn queue_activity_rows(&self) -> usize {
@@ -283,41 +281,6 @@ impl TuiApp {
             ));
         }
 
-        let Some(max) = self.context_window else {
-            return Line::from(left);
-        };
-
-        let context = context_bar_spans(self.last_prompt_tokens, max);
-        if spans_width(&left) + spans_width(&context) + 2 > width {
-            let model_budget = width
-                .saturating_sub(spans_width(&context))
-                .saturating_sub(12)
-                .max(8);
-            left = vec![
-                Span::styled(
-                    "μAgent",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                dim_dot_separator(),
-                Span::styled(
-                    one_line(&self.config.model, model_budget),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ];
-        }
-
-        let left_w = spans_width(&left);
-        let context_w = spans_width(&context);
-        if left_w + context_w + 2 <= width {
-            left.push(Span::raw(" ".repeat(width - left_w - context_w)));
-        } else {
-            left.push(dim_dot_separator());
-        }
-        left.extend(context);
         Line::from(left)
     }
 
@@ -327,31 +290,40 @@ impl TuiApp {
         }
 
         match self.panel {
-            TuiPanel::Jobs if self.sh_jobs.is_empty() => "Esc · Ctrl-B",
-            TuiPanel::Jobs => "↑↓ · Enter · Esc · Ctrl-B",
-            TuiPanel::JobDetail => "↑↓ · PgUp/PgDn · Esc · Ctrl-B",
+            TuiPanel::Jobs if self.sh_jobs.is_empty() => "Esc back · Ctrl-B chat · Ctrl-C quit",
+            TuiPanel::Jobs => "↑↓ · Enter · Esc back · Ctrl-C quit",
+            TuiPanel::JobDetail => "↑↓ · PgUp/PgDn · Esc back · Ctrl-C quit",
             TuiPanel::Chat if self.status == "cancelling" && self.scroll_back > 0 => {
-                "Enter locked · End bottom · Ctrl-C force quit"
+                "Enter locked · End bottom · Ctrl-C quit"
             }
             TuiPanel::Chat if self.status == "cancelling" => {
-                "Enter locked · draft kept · Ctrl-C force quit"
+                "Enter locked · draft kept · Ctrl-C quit"
             }
             TuiPanel::Chat if self.is_submit_locked() && self.scroll_back > 0 => {
-                "Enter locked · End bottom · Esc stop"
+                "Enter locked · End bottom · Esc stop · Ctrl-C quit"
             }
-            TuiPanel::Chat if self.is_submit_locked() => "Enter locked · draft kept",
+            TuiPanel::Chat if self.is_submit_locked() => "Enter locked · draft kept · Ctrl-C quit",
             TuiPanel::Chat
                 if matches!(self.status.as_str(), "running" | "cancelling")
                     && self.scroll_back > 0 =>
             {
-                "End bottom · Enter queue · Esc stop"
+                "End bottom · Enter queue · Esc stop · Ctrl-C quit"
             }
-            TuiPanel::Chat if self.scroll_back > 0 => "PgUp/PgDn · End bottom",
+            TuiPanel::Chat if self.scroll_back > 0 => "PgUp/PgDn · End bottom · Ctrl-C quit",
             TuiPanel::Chat if matches!(self.status.as_str(), "running" | "cancelling") => {
                 "Enter queue · Esc stop · Ctrl-C quit"
             }
-            TuiPanel::Chat if self.pastes.is_empty() => "Enter · ↑↓ history · Tab · Ctrl-B",
-            TuiPanel::Chat => "Enter · Backspace paste · Ctrl-B",
+            TuiPanel::Chat if self.pastes.is_empty() => {
+                "Enter · ↑↓ history · Tab · Ctrl-B jobs · Ctrl-C quit"
+            }
+            TuiPanel::Chat => "Enter · Backspace paste · Ctrl-B jobs · Ctrl-C quit",
+        }
+    }
+
+    fn footer_context_spans(&self) -> Vec<Span<'static>> {
+        match self.context_window {
+            Some(max) => context_bar_spans(self.last_prompt_tokens, max),
+            None => Vec::new(),
         }
     }
 
@@ -453,48 +425,6 @@ impl TuiApp {
         frame.render_widget(ratatui::widgets::Clear, area);
         let popup = Paragraph::new(lines);
         frame.render_widget(popup, area);
-    }
-
-    /// Footer status: animated braille spinner + elapsed/tokens during a
-    /// running turn, otherwise a static colored dot.
-    fn render_status_indicator(&self) -> Vec<Span<'static>> {
-        let label = self.footer_status_label();
-        let color = status_color(&self.status);
-        match self.turn_started {
-            Some(started) => {
-                let elapsed = started.elapsed();
-                // Renamed from `frame` to `glyph` to avoid shadowing the
-                // `frame: &mut Frame<'_>` parameter that other render
-                // methods take — easier to grep and to read.
-                let glyph = spinner_frame_at(elapsed);
-                let accent = Style::default().fg(color).add_modifier(Modifier::BOLD);
-                vec![
-                    Span::styled(format!("{glyph} "), accent),
-                    Span::styled(label, accent),
-                    Span::styled(
-                        format!(" {}", format_turn_meta(elapsed, self.turn_tokens)),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]
-            }
-            None => status_dot(label, color),
-        }
-    }
-
-    fn footer_status_label(&self) -> String {
-        match self.status.as_str() {
-            "running" => self
-                .activity
-                .iter()
-                .rev()
-                .filter_map(|entry| activity_footer_label(entry))
-                .next()
-                .unwrap_or_else(|| "Thinking".into()),
-            "cancelling" => "Stopping".into(),
-            "idle" => "Ready".into(),
-            "setup" => "Setup".into(),
-            other => title_case_status(other),
-        }
     }
 
     fn render_messages(&self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
@@ -633,21 +563,42 @@ impl TuiApp {
                     .turn_started
                     .map(|started| spinner_frame_at(started.elapsed()))
                     .unwrap_or("⠋");
-                (format!("{glyph} {label}"), Color::Yellow, true)
+                let meta = self
+                    .turn_started
+                    .map(|started| {
+                        format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
+                    })
+                    .unwrap_or_default();
+                (format!("{glyph} {label}{meta}"), Color::Yellow, true)
             } else if let Some(label) = entry.strip_prefix("Running ") {
                 let glyph = self
                     .turn_started
                     .map(|started| spinner_frame_at(started.elapsed()))
                     .unwrap_or("⠋");
-                (format!("{glyph} {label}"), Color::Yellow, true)
+                let meta = self
+                    .turn_started
+                    .map(|started| {
+                        format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
+                    })
+                    .unwrap_or_default();
+                (format!("{glyph} {label}{meta}"), Color::Yellow, true)
             } else if let Some(label) = entry.strip_prefix("Tool failed: ") {
                 (format!("failed · {label}"), Color::Red, true)
             } else if entry.starts_with("error:") {
                 (entry.to_string(), Color::Red, true)
-            } else if entry.starts_with("paused:")
-                || entry == "stopped"
-                || entry == "stopping current task"
-            {
+            } else if entry == "stopped" || entry == "stopping current task" {
+                let glyph = self
+                    .turn_started
+                    .map(|started| spinner_frame_at(started.elapsed()))
+                    .unwrap_or("⠋");
+                let meta = self
+                    .turn_started
+                    .map(|started| {
+                        format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
+                    })
+                    .unwrap_or_default();
+                (format!("{glyph} Stopping{meta}"), Color::Red, true)
+            } else if entry.starts_with("paused:") {
                 (title_case_status(entry), Color::Yellow, true)
             } else if let Some(label) = activity_footer_label(entry) {
                 (label, Color::DarkGray, false)
@@ -802,12 +753,14 @@ impl TuiApp {
     }
 
     pub(super) fn sh_job_status_text(&self) -> String {
-        let running = self
-            .sh_jobs
+        format!("sh {}", self.running_sh_job_count())
+    }
+
+    pub(super) fn running_sh_job_count(&self) -> usize {
+        self.sh_jobs
             .iter()
             .filter(|job| job.state == ExecJobState::Running)
-            .count();
-        format!("sh {running}/{}", self.sh_jobs.len())
+            .count()
     }
 
     fn paste_summary_line_with_style(&self, style: Style) -> Line<'static> {
@@ -855,6 +808,10 @@ impl TuiApp {
             // one cluster instead of N rainbow stripes.
             let in_cluster = matches!(message.role, ChatRole::Tool)
                 && matches!(prev_role, Some(ChatRole::Assistant) | Some(ChatRole::Tool));
+            let running_tool = self
+                .running_tools
+                .iter()
+                .any(|(_, message_idx)| *message_idx == i);
 
             let (label, style) = if in_cluster {
                 ("  ", Style::default().fg(Color::Magenta))
@@ -881,6 +838,15 @@ impl TuiApp {
                 let body_style = role_body_style(&message.role);
                 if in_code {
                     push_code_block_line(&mut lines, label, style, raw, width);
+                } else if running_tool {
+                    push_running_tool_line(
+                        &mut lines,
+                        label,
+                        style,
+                        raw,
+                        width,
+                        self.running_tool_sweep_offset(),
+                    );
                 } else {
                     push_wrapped_message_line(&mut lines, label, style, body_style, raw, width);
                 }
@@ -900,6 +866,46 @@ impl TuiApp {
         }
         lines
     }
+
+    fn running_tool_sweep_offset(&self) -> usize {
+        self.turn_started
+            .map(|started| (started.elapsed().as_millis() / 80) as usize)
+            .unwrap_or(0)
+    }
+}
+
+fn push_running_tool_line(
+    lines: &mut Vec<Line<'static>>,
+    label: &'static str,
+    label_style: Style,
+    raw: &str,
+    width: usize,
+    offset: usize,
+) {
+    let content_width = width.saturating_sub(UnicodeWidthStr::width(label)).max(1);
+    let text = one_line(raw, content_width);
+    let chars = text.chars().collect::<Vec<_>>();
+    let len = chars.len().max(1);
+    let head = offset % (len + 8);
+    let mut spans = vec![Span::styled(label.to_string(), label_style)];
+    for (idx, ch) in chars.into_iter().enumerate() {
+        let distance = head.saturating_sub(idx);
+        let style = if head < len && idx == head {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else if head < len && distance <= 3 && idx <= head {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::DIM)
+        };
+        spans.push(Span::styled(ch.to_string(), style));
+    }
+    lines.push(Line::from(spans));
 }
 
 fn activity_footer_label(entry: &str) -> Option<String> {

@@ -15,27 +15,6 @@ use crate::adapters::ExecJobState;
 
 use super::ChatRole;
 
-pub(super) fn status_color(status: &str) -> Color {
-    match status {
-        "running" => Color::Yellow,
-        "cancelling" => Color::Red,
-        "idle" => Color::Green,
-        _ => Color::Cyan,
-    }
-}
-
-/// `● label` colored span pair used in the footer to surface status state
-/// without resorting to heavy black-on-color block badges.
-pub(super) fn status_dot(label: String, color: Color) -> Vec<Span<'static>> {
-    vec![
-        Span::styled("● ", Style::default().fg(color)),
-        Span::styled(
-            label,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-    ]
-}
-
 pub(super) fn dim_dot_separator() -> Span<'static> {
     Span::styled(" · ", Style::default().fg(Color::DarkGray))
 }
