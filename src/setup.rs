@@ -29,16 +29,13 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
     let model_net = Arc::new(ReqwestEgress::new().map_err(|e| format!("net init: {e:?}"))?);
     let model = build_model_adapter(&cfg.model, model_net.clone())?;
 
-    // Adapter bundle: fs root + shell process execution + optional agent HTTP.
+    // Adapter bundle: fs root + shell process execution.
     let fs = Arc::new(LinuxFileSystem::new(vec![cfg.fs.root.clone()]));
     let proc = Arc::new(LinuxProcessExec::new());
-    let mut builder = AdapterBundle::builder().fs(fs).proc(proc);
-    if cfg.net_http.enabled {
-        let tool_net = Arc::new(ReqwestEgress::new().map_err(|e| format!("tool net init: {e:?}"))?);
-        builder = builder.net(tool_net);
-    }
     let bundle = Arc::new(
-        builder
+        AdapterBundle::builder()
+            .fs(fs)
+            .proc(proc)
             .build()
             .map_err(|e| format!("adapter bundle: {e:?}"))?,
     );
@@ -224,11 +221,6 @@ fn system_prompt(cfg: &Config) -> String {
         "- Shell execution: enabled. sh_exec can run binaries available on PATH \
          from the filesystem root.\n",
     );
-    if cfg.net_http.enabled {
-        s.push_str("- HTTP tool: enabled.\n");
-    } else {
-        s.push_str("- HTTP tool: disabled.\n");
-    }
     if !cfg.mcp.sse_endpoints.is_empty() {
         s.push_str(&format!(
             "- External MCP SSE endpoints connected: {}. Their tools are available by their listed tool names.\n",

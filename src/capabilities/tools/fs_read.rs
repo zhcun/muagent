@@ -342,8 +342,8 @@ fn sniff_image_mime(data: &[u8]) -> Option<&'static str> {
     None
 }
 
-/// Minimal base64 encoder (same as the one in net_http). Kept private to
-/// avoid a crate-wide dep just for this.
+/// Minimal base64 encoder. Kept private to avoid a crate-wide dep just for
+/// this.
 fn base64_encode(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);

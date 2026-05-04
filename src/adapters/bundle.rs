@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::core::net::NetEgress;
-
 use super::fs::FileSystem;
 use super::proc_exec::ProcessExec;
 
@@ -11,7 +9,6 @@ use super::proc_exec::ProcessExec;
 pub struct AdapterBundle {
     pub fs: Arc<dyn FileSystem>,
     pub proc: Option<Arc<dyn ProcessExec>>,
-    pub net: Option<Arc<dyn NetEgress>>,
 }
 
 impl AdapterBundle {
@@ -24,7 +21,6 @@ impl AdapterBundle {
 pub struct AdapterBundleBuilder {
     fs: Option<Arc<dyn FileSystem>>,
     proc: Option<Arc<dyn ProcessExec>>,
-    net: Option<Arc<dyn NetEgress>>,
 }
 
 impl AdapterBundleBuilder {
@@ -36,16 +32,11 @@ impl AdapterBundleBuilder {
         self.proc = Some(p);
         self
     }
-    pub fn net(mut self, n: Arc<dyn NetEgress>) -> Self {
-        self.net = Some(n);
-        self
-    }
 
     pub fn build(self) -> Result<AdapterBundle, &'static str> {
         Ok(AdapterBundle {
             fs: self.fs.ok_or("fs required")?,
             proc: self.proc,
-            net: self.net,
         })
     }
 }

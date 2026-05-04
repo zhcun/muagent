@@ -714,7 +714,7 @@ CONFIG FILES:
     api_key_env = \"GEMINI_API_KEY\"
     [tools]
     # enabled = [] means expose no tools; omit enabled to expose all registered tools.
-    disabled = [\"net_http\"]
+    disabled = [\"sh_exec\"]
     [compaction]
     max_tokens = 156000
     summary_input_max_tokens = 100000
@@ -995,7 +995,7 @@ mod tests {
     fn config_flags_fill_overrides_without_env_mutation() {
         let got = invocation(&[
             "--disable-tools",
-            "net_http,sh_exec",
+            "fs_write,sh_exec",
             "--max-tokens",
             "42000",
             "exec",
@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(got.mode, RunMode::Exec("run task".into()));
         assert_eq!(
             got.config.tool_denylist,
-            Some(vec!["net_http".into(), "sh_exec".into()])
+            Some(vec!["fs_write".into(), "sh_exec".into()])
         );
         assert_eq!(got.config.max_tokens, Some(42_000));
     }

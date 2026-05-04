@@ -10,7 +10,6 @@ pub mod fs_read;
 pub mod fs_rename;
 pub mod fs_stat;
 pub mod fs_write;
-pub mod net_http;
 pub mod sh_exec;
 
 use std::sync::Arc;
@@ -65,7 +64,6 @@ pub(crate) fn map_fs_err(e: crate::adapters::FsErr) -> ToolErr {
 ///
 /// - `fs_*` (read / edit / write / list / stat / delete / rename): always registered
 /// - `sh_exec`: only if `bundle.proc` is provided
-/// - `net_http`: only if `bundle.net` is provided
 pub fn register_defaults(registry: &CapabilityRegistry, bundle: Arc<AdapterBundle>) {
     registry.register(Arc::new(fs_edit::FsEdit::new(bundle.clone())));
     registry.register(Arc::new(fs_read::FsRead::new(bundle.clone())));
@@ -76,8 +74,5 @@ pub fn register_defaults(registry: &CapabilityRegistry, bundle: Arc<AdapterBundl
     registry.register(Arc::new(fs_rename::FsRename::new(bundle.clone())));
     if bundle.proc.is_some() {
         registry.register(Arc::new(sh_exec::ShExec::new(bundle.clone())));
-    }
-    if let Some(net) = bundle.net.clone() {
-        registry.register(Arc::new(net_http::NetHttp::new(net)));
     }
 }

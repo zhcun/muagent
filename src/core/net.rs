@@ -1,9 +1,8 @@
 //! `NetEgress` adapter trait + supporting types and helpers.
 //!
-//! Lives in core because *every* surface that talks to a remote endpoint
-//! (model adapters, MCP HTTP transport, future built-in HTTP tool) needs
-//! the abstract trait, but none of them want a runtime IO dependency. The
-//! concrete impl (e.g. `muagent-net-reqwest`) is selected by the host.
+//! Lives in core because model adapters and MCP HTTP transports need the
+//! abstract trait, but none of them want a runtime IO dependency. The concrete
+//! impl is selected by the host.
 
 use async_trait::async_trait;
 

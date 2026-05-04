@@ -1,19 +1,17 @@
 //! Cumulative file-operation ledger for compaction.
 //!
-//! Why this exists: when a coding agent's session is compacted, the raw
+//! Why this exists: when an agent's session is compacted, the raw
 //! tool_call/tool_result pairs that *named* the files get summarized into
 //! prose. The summarizer LLM may or may not preserve the exact file paths.
 //! That's a real problem for follow-up turns: the model needs to know
 //! "I've already read src/foo.rs" or "I've modified Cargo.toml" without
 //! re-reading them.
 //!
-//! pi-mono's compaction (`packages/coding-agent/docs/compaction.md`)
-//! addresses this with a `CompactionEntry.details.{readFiles, modifiedFiles}`
-//! that accumulates **across** every compaction. Codex tracks file changes
-//! through its tool history layer. We do the same here, but render the
-//! ledger as a deterministic markdown section embedded in the summary
-//! observation — that keeps the data inside the prompt the model reads,
-//! and survives session reload because it's part of `state.history`.
+//! Related compaction designs solve this with a structured ledger that
+//! accumulates **across** every compaction. We do the same here, but render
+//! the ledger as a deterministic markdown section embedded in the summary
+//! observation — that keeps the data inside the prompt the model reads, and
+//! survives session reload because it's part of `state.history`.
 //!
 //! ## Where the data comes from
 //!
@@ -226,7 +224,7 @@ mod tests {
     fn ignores_unknown_tools() {
         let mut l = FileLedger::default();
         l.absorb_tool_call("sh_exec", &json!({"command": "rm -rf /"}));
-        l.absorb_tool_call("net_http", &json!({"url": "https://x"}));
+        l.absorb_tool_call("mcp_fetch", &json!({"url": "https://x"}));
         assert!(l.is_empty());
     }
 

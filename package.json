@@ -2,7 +2,7 @@
   "name": "muagent",
   "version": "0.1.0",
   "private": true,
-  "description": "Local-first agent runtime and terminal CLI for model-backed work in a repository.",
+  "description": "A minimal harness for a complete local agent.",
   "license": "Apache-2.0 OR MIT",
   "repository": {
     "type": "git",

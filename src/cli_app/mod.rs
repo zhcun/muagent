@@ -189,11 +189,5 @@ pub fn print_banner(cfg: &Config) {
             "off"
         }
     );
-    let net = if cfg.net_http.enabled {
-        "net_http:unrestricted"
-    } else {
-        "net_http:disabled"
-    };
-    println!("  {net}");
     println!("Type /help for commands. Ctrl-D to quit.\n");
 }

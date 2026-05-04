@@ -61,44 +61,9 @@ async fn cli_help_and_quit_without_network() {
         "skills command missing: {stdout}"
     );
     assert!(
-        stdout.contains("net_http:unrestricted"),
-        "net_http should be unrestricted by default: {stdout}"
-    );
-    assert!(
         stdout.contains("agent_md=on"),
         "agent_md banner missing: {stdout}"
     );
-    assert!(
-        out.status.success(),
-        "cli exit non-zero; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[tokio::test]
-async fn cli_can_disable_http_tool_banner() {
-    let mut cmd = Command::new(bin());
-    cmd.arg("repl");
-    cmd.env("MUAGENT_STORE", "memory")
-        .env("MUAGENT_PROVIDER", "openrouter")
-        .env("MUAGENT_NET_HTTP", "off")
-        .env_remove("OPENROUTER_API_KEY")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let mut child = cmd.spawn().expect("spawn muagent");
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"/quit\n").await.unwrap();
-    drop(stdin);
-
-    let out = timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .expect("cli did not exit in 5s")
-        .expect("wait");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("net_http:disabled"), "{stdout}");
     assert!(
         out.status.success(),
         "cli exit non-zero; stderr:\n{}",

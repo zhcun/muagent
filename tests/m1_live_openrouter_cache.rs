@@ -66,7 +66,6 @@ fn cli_default_system_from_source() -> String {
             .display()
     ));
     system.push_str("- Shell execution: disabled.\n");
-    system.push_str("- HTTP tool: disabled.\n");
     system
 }
 

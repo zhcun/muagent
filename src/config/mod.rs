@@ -34,7 +34,6 @@ pub struct Config {
     pub fs: FsConfig,
     pub compaction: CompactionConfig,
     pub capabilities: CapabilityConfig,
-    pub net_http: NetHttpConfig,
     pub mcp: McpConfig,
     pub runtime: RuntimeConfig,
     pub agent_instructions: AgentInstructionConfig,
@@ -98,12 +97,6 @@ pub struct CapabilityConfig {
     pub skill_denylist: Vec<String>,
     /// Auto-discover skills from `./.muagent/skills/` and `~/.muagent/skills/`.
     pub skill_autoload: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct NetHttpConfig {
-    /// Whether the agent-facing `net_http` tool is registered.
-    pub enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -182,7 +175,6 @@ impl Config {
             fs: FsConfig::from_sources(&file_cfg, overrides),
             compaction: CompactionConfig::from_sources(&file_cfg, overrides)?,
             capabilities: CapabilityConfig::from_sources(&file_cfg, overrides)?,
-            net_http: NetHttpConfig::from_sources(&file_cfg)?,
             mcp: McpConfig::from_sources(&file_cfg, overrides),
             runtime: RuntimeConfig::from_sources(&file_cfg, overrides)?,
             agent_instructions: AgentInstructionConfig::from_sources(&file_cfg)?,
@@ -530,20 +522,6 @@ impl CapabilityConfig {
                 })
                 .unwrap_or_default(),
             skill_autoload,
-        })
-    }
-}
-
-impl NetHttpConfig {
-    fn from_sources(file_cfg: &FileConfig) -> Result<Self, String> {
-        Ok(Self {
-            enabled: parse_env_bool("MUAGENT_NET_HTTP")?
-                .or(parse_file_bool(
-                    file_cfg,
-                    &["net_http.enabled", "net_http", "http.enabled"],
-                    "net_http.enabled",
-                )?)
-                .unwrap_or(true),
         })
     }
 }
@@ -946,8 +924,8 @@ mod tests {
     use super::file::parse_config_text;
     use super::{
         AgentInstructionConfig, CapabilityConfig, CompactionConfig, Config, ConfigOverrides,
-        EffortCfg, FileConfig, FsConfig, ModelConfig, NetHttpConfig, Provider, RuntimeConfig,
-        StoreConfig, ThinkingModeCfg,
+        EffortCfg, FileConfig, FsConfig, ModelConfig, Provider, RuntimeConfig, StoreConfig,
+        ThinkingModeCfg,
     };
     use crate::core::thinking::ThinkingSupport;
 
@@ -960,7 +938,7 @@ mod tests {
             model = "openai/gpt-5.4-nano"
             api_key = "sk-or-test"
             [tools]
-            disabled = ["net_http"]
+            disabled = ["sh_exec"]
             "#,
         )
         .unwrap();
@@ -975,7 +953,7 @@ mod tests {
         );
         assert_eq!(
             cfg.list(&["tools.disabled"]).unwrap(),
-            vec!["net_http".to_string()]
+            vec!["sh_exec".to_string()]
         );
     }
 
@@ -1300,7 +1278,6 @@ mod tests {
                 skill_denylist: Vec::new(),
                 skill_autoload: true,
             },
-            net_http: NetHttpConfig { enabled: true },
             mcp: super::McpConfig {
                 sse_endpoints: Vec::new(),
             },

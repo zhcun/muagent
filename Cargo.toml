@@ -6,7 +6,7 @@ license = "Apache-2.0 OR MIT"
 rust-version = "1.75"
 authors = ["μAgent contributors"]
 repository = "https://github.com/zhcun/muagent"
-description = "Local-first agent runtime and terminal CLI for model-backed work in a repository."
+description = "A minimal harness for a complete local agent."
 
 [lib]
 name = "muagent"

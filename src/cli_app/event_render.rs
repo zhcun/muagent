@@ -93,17 +93,6 @@ pub fn tool_display_label(tool: &str, args: &serde_json::Value) -> String {
         "fs_stat" => ("Stat", s(args, "path")),
         "fs_delete" => ("Delete", s(args, "path")),
         "fs_rename" => ("Rename", format!("{} → {}", s(args, "from"), s(args, "to"))),
-        "net_http" => {
-            let method = {
-                let m = s(args, "method");
-                if m.is_empty() {
-                    "GET".to_string()
-                } else {
-                    m
-                }
-            };
-            ("Http", format!("{method} {}", s(args, "url")))
-        }
         other => {
             let fallback = if let serde_json::Value::Object(map) = args {
                 map.values()

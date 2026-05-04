@@ -291,7 +291,7 @@ muagent -- "- This prompt starts with a dash."
 List arguments use commas:
 
 ```bash
-muagent --disable-tools sh_exec,net_http "Analyze without shell or network."
+muagent --disable-tools sh_exec "Analyze without shell access."
 muagent --tools fs_read,fs_list,fs_stat "Inspect files without write tools."
 ```
 
@@ -313,12 +313,12 @@ Run without writing persistent session history:
 muagent --store memory exec "Try this once and discard the session."
 ```
 
-Constrain file access to the current repository and disable shell/network tools:
+Constrain file access to the current project and disable shell tools:
 
 ```bash
 muagent \
   --root . \
-  --disable-tools sh_exec,net_http \
+  --disable-tools sh_exec \
   exec "Review the public documentation."
 ```
 
@@ -376,8 +376,6 @@ Built-in tools:
 
 - `fs_read`, `fs_write`, `fs_edit`, `fs_list`, `fs_stat`, `fs_delete`,
   `fs_rename`
-- `net_http`, registered by default and removable with `MUAGENT_NET_HTTP=off`
-  or `--disable-tools net_http`
 - `sh_exec`, registered by default and able to run binaries on `PATH` or by
   explicit path
 

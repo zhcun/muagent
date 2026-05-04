@@ -1,11 +1,13 @@
 # μAgent
 
-Local-first agent runtime and terminal CLI for model-backed work in a
-repository.
+A minimal harness for a complete local agent.
 
-`muagent` can run one-shot tasks, open a terminal UI, resume persisted sessions,
-use file/network/shell tools, load skills, and talk to OpenAI, OpenRouter,
-Anthropic, Google, or OpenAI Codex OAuth.
+`muagent` keeps the interface small while shipping the full agent loop: model
+adapters, filesystem/shell tools, resumable sessions, long-context
+compaction, skill and MCP loading, image inputs, and terminal-first workflows
+through one-shot `exec` and a full-screen TUI.
+
+It works with OpenRouter, OpenAI, OpenAI Codex OAuth, Anthropic, and Google.
 
 ## Install
 
@@ -89,10 +91,9 @@ config, and model capability overrides.
 
 ```bash
 # Basic modes
-muagent exec "Summarize this repository."
+muagent exec "Summarize this project."
 muagent "Open the TUI with this initial prompt."
 muagent
-muagent repl
 
 # Provider and model overrides
 muagent --provider openai exec "List the test entry points."
@@ -121,11 +122,11 @@ muagent --provider openai resume --last
 
 ## Documentation
 
-- [USAGE.md](USAGE.md): CLI modes, TUI/REPL commands, tools, skills, and
-  session usage
+- [USAGE.md](USAGE.md): CLI modes, TUI commands, tools, skills, and session
+  usage
 - [CONFIG.md](CONFIG.md): provider defaults, config files, model capabilities,
   and OAuth
 - [DEVELOPMENT.md](DEVELOPMENT.md): local commands, tests, benchmarks, and
-  repository layout
+  source layout
 - [BUILD.md](BUILD.md): cross-platform build and deployment notes
 - [RELEASING.md](RELEASING.md): release process and assets

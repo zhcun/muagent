@@ -61,7 +61,7 @@ Write config in this order:
    overrides
 4. `[runtime]`: cache and thinking behavior
 5. `[store]`: session persistence
-6. `[fs]`, `[tools]`, `[skills]`, `[net_http]`, `[mcp]`: capability boundaries
+6. `[fs]`, `[tools]`, `[skills]`, `[mcp]`: capability boundaries
 7. `[compaction]`, `[agent_md]`: long-context and project-instruction settings
 
 Create a user-level config:
@@ -219,14 +219,10 @@ root = "."
 # Omit enabled to expose every registered tool.
 # enabled = [] explicitly exposes no tools.
 enabled = ["fs_read", "fs_write", "fs_list", "fs_stat", "fs_edit", "fs_rename", "fs_delete", "sh_exec"]
-disabled = ["net_http"]
 
 [skills]
 # Omit enabled to expose every discovered skill.
 disabled = []
-
-[net_http]
-enabled = false
 
 [mcp]
 sse_endpoints = ["http://127.0.0.1:10086/sse"]
@@ -267,12 +263,12 @@ model = "openai/gpt-5.4-nano"
 api_key_env = "OPENROUTER_API_KEY"
 ```
 
-Disable shell and network tools while keeping read-only filesystem inspection:
+Disable shell tools while keeping read-only filesystem inspection:
 
 ```toml
 [tools]
 enabled = ["fs_read", "fs_list", "fs_stat"]
-disabled = ["sh_exec", "net_http"]
+disabled = ["sh_exec"]
 ```
 
 Use throwaway in-memory sessions:
@@ -451,7 +447,7 @@ Environment variable: `MUAGENT_STORE`. CLI flag: `--store <SPEC>`.
 ```toml
 [tools]
 enabled = ["fs_read", "fs_write", "fs_list"]
-disabled = ["net_http"]
+disabled = ["sh_exec"]
 
 [skills]
 enabled = ["filesystem"]
@@ -481,19 +477,15 @@ enabled = ["fs_read", "fs_list", "fs_stat"]
 disabled = ["fs_stat"]
 ```
 
-## net_http And MCP
+## MCP
 
 ```toml
-[net_http]
-enabled = true
-
 [mcp]
 sse_endpoints = ["http://127.0.0.1:10086/sse"]
 ```
 
 | Config | Default | Environment | CLI |
 |---|---:|---|---|
-| `net_http.enabled` | `true` | `MUAGENT_NET_HTTP` | Hide with `--disable-tools net_http` |
 | `mcp.sse_endpoints` / `mcp.sse` | `[]` | `MUAGENT_MCP_SSE` | `--mcp-sse <URLS>` |
 
 ## Runtime
@@ -590,7 +582,6 @@ workspace ancestors and the user config directory.
 | `MUAGENT_CODEX_ACCESS_TOKEN`, `MUAGENT_CODEX_ACCOUNT_ID`, `MUAGENT_CODEX_REFRESH_TOKEN` | OpenAI Codex override |
 | `MUAGENT_STORE` | Session store |
 | `MUAGENT_ROOT` | File-tool root |
-| `MUAGENT_NET_HTTP` | Whether `net_http` is registered |
 | `MUAGENT_TOOLS`, `MUAGENT_DISABLE_TOOLS` | Tool allowlist and denylist |
 | `MUAGENT_SKILLS`, `MUAGENT_DISABLE_SKILLS`, `MUAGENT_SKILL_AUTOLOAD` | Skill settings |
 | `MUAGENT_CACHE`, `MUAGENT_THINKING` | Runtime settings |
@@ -606,7 +597,7 @@ muagent \
   --provider openai \
   --model gpt-5.4-nano \
   --root . \
-  --disable-tools net_http \
+  --disable-tools sh_exec \
   "Run the relevant tests."
 ```
 
@@ -629,8 +620,8 @@ Common failures:
   `google`, or `openrouter`.
 - `config file not found`: `--config-file` and `MUAGENT_CONFIG` require the
   file to exist.
-- `invalid runtime.cache` or `invalid net_http.enabled`: use supported boolean
-  values such as `true`, `false`, `on`, or `off`.
+- `invalid runtime.cache`: use supported boolean values such as `true`,
+  `false`, `on`, or `off`.
 - `unknown thinking value`: use `off`, `auto`, `minimal`, `low`, `medium`,
   `high`, `max`, or `xhigh`.
 - Authentication failures: check `MUAGENT_API_KEY` first, then the
