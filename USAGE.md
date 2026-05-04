@@ -7,34 +7,30 @@ development commands.
 
 ## Install The CLI
 
-Requirements:
+### Release Install
 
-- GitHub CLI authenticated with access to `zhcun/muagent`, for the recommended
-  GitHub Release install path
-- Rust/Cargo 1.75+, only for source installs or local development
-- Node.js 16+, only if you use the local `npm install -g .` shim below
-
-### Recommended: GitHub Release
-
-Install the latest internal release on macOS or Linux:
+Install the latest release on macOS or Linux:
 
 ```bash
-case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64) target="aarch64-apple-darwin" ;;
-  Darwin-x86_64) target="x86_64-apple-darwin" ;;
-  Linux-x86_64) target="x86_64-unknown-linux-musl" ;;
-  *) echo "unsupported platform"; exit 1 ;;
-esac
-
-tmp="$(mktemp -d)"
-gh release download --repo zhcun/muagent --pattern "muagent-*-${target}.tar.gz" --dir "$tmp"
-tar -xzf "$tmp"/muagent-*-"${target}".tar.gz -C "$tmp"
-sudo install -m 755 "$tmp"/muagent-*-"${target}"/muagent /usr/local/bin/muagent
+curl -fsSL https://raw.githubusercontent.com/zhcun/muagent/main/scripts/install.sh | sh
 muagent --help
+```
+
+The installer selects the latest GitHub Release by default and supports macOS
+Apple Silicon, macOS Intel, and Linux x64.
+
+Run the same command again to upgrade; it skips work when the installed version
+already matches latest.
+
+Uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhcun/muagent/main/scripts/install.sh | sh -s -- --uninstall
 ```
 
 ### Source Install
 
+Source installs require Rust/Cargo. The local npm shim also requires Node.js.
 Install Rust first if needed:
 
 ```bash
@@ -113,24 +109,31 @@ The npm package is currently intended for local installs, so use
 
 ## Configure A Provider
 
-`muagent` loads config files first, then applies `.env`, environment variables,
-and CLI flags. Installation does not create a config file automatically:
+For the default OpenRouter provider, an environment variable is enough:
 
-```bash
-mkdir -p ~/.muagent
-$EDITOR ~/.muagent/config.toml
+```dotenv
+OPENROUTER_API_KEY=sk-or-...
 ```
 
-Keep secrets in environment variables or `.env`, and reference the variable name
-from config:
+Put that in a `.env` file in the workspace where you run `muagent`, then run:
 
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
-export OPENAI_API_KEY=sk-...
+muagent exec "Summarize this repository."
 ```
 
-Example with OpenRouter as the default provider, plus OpenAI and OpenAI Codex
-profiles for explicit switching:
+Use provider flags for temporary switches:
+
+```dotenv
+OPENAI_API_KEY=sk-...
+```
+
+```bash
+muagent --provider openai --model gpt-5.4-nano exec "Run the focused tests."
+```
+
+Create `~/.muagent/config.toml` only when you want durable defaults. Example
+with OpenRouter as the default provider, plus OpenAI and OpenAI Codex profiles
+for explicit switching:
 
 ```toml
 [model]

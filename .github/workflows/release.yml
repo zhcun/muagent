@@ -72,7 +72,9 @@ jobs:
           set -euo pipefail
           asset="muagent-${RELEASE_TAG}-${{ matrix.target }}"
           mkdir -p "dist/${asset}"
+          mkdir -p "dist/${asset}/scripts"
           cp "target/${{ matrix.target }}/min/muagent" "dist/${asset}/"
+          cp scripts/install.sh "dist/${asset}/scripts/"
           cp README.md USAGE.md CONFIG.md BUILD.md DEVELOPMENT.md RELEASING.md LICENSE-* "dist/${asset}/"
           tar -czf "dist/${asset}.tar.gz" -C dist "${asset}"
 

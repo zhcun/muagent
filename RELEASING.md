@@ -19,6 +19,7 @@ not need to be uploaded manually.
 The packaged files include:
 
 - `muagent`
+- `scripts/install.sh`
 - `README.md`
 - `USAGE.md`
 - `CONFIG.md`
@@ -45,6 +46,17 @@ to the GitHub Release page.
 
 You can also run the workflow manually from GitHub Actions with an existing tag,
 for example `v0.1.0`.
+
+## Install Script
+
+The user-facing install path is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhcun/muagent/main/scripts/install.sh | sh
+```
+
+The script installs the latest release by default. Use `MUAGENT_VERSION` for a
+specific tag and `MUAGENT_INSTALL_DIR` for a non-default destination.
 
 ## Tests
 
