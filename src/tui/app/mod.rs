@@ -284,6 +284,20 @@ impl TuiApp {
         self.add(ChatRole::Tool, text);
     }
 
+    pub fn fail_running_tool_calls(&mut self, brief: impl AsRef<str>) {
+        let brief = brief.as_ref();
+        for (_, idx) in std::mem::take(&mut self.running_tools) {
+            if let Some(message) = self.messages.get_mut(idx) {
+                let display = message
+                    .text
+                    .strip_prefix("⏺ ")
+                    .unwrap_or(&message.text)
+                    .to_string();
+                message.text = completed_tool_call_text(&display, false, brief, None);
+            }
+        }
+    }
+
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.running_tools.clear();

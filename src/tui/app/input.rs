@@ -5,8 +5,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 
 use super::super::style::{common_prefix, new_input, paste_line_count, trim_newlines};
-use super::types::{InputDraft, PasteBlock, TuiPanel, UserAction, UserSubmission};
 use super::TuiApp;
+use super::types::{InputDraft, PasteBlock, TuiPanel, UserAction, UserSubmission};
 
 const MAX_INPUT_HISTORY: usize = 100;
 const MAX_HISTORY_ENTRY_CHARS: usize = 8000;
@@ -393,6 +393,7 @@ impl TuiApp {
     }
 
     fn set_input_text(&mut self, text: &str) {
+        self.leave_history_navigation();
         let mut input = new_input();
         if !text.is_empty() {
             input.insert_str(text);

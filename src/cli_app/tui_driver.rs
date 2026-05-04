@@ -19,14 +19,14 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-use crate::cli_app::commands::{handle, CmdAction};
+use crate::cli_app::commands::{CmdAction, handle};
 use crate::cli_app::doctor::{config_doctor_report, model_setup_hints};
-use crate::cli_app::driver::{submit_and_drive_with_updates, TuiUpdate};
+use crate::cli_app::driver::{TuiUpdate, submit_and_drive_with_updates};
 use crate::cli_app::tui_helpers::{
-    provider_label, seed_tui_history_messages, seed_tui_input_history, sync_tui_runtime,
-    thinking_label, TuiAppSink,
+    TuiAppSink, provider_label, seed_tui_history_messages, seed_tui_input_history,
+    sync_tui_runtime, thinking_label,
 };
-use crate::cli_app::{truncate, ReplRuntime, TUI_MAX_QUEUED_SUBMISSIONS};
+use crate::cli_app::{ReplRuntime, TUI_MAX_QUEUED_SUBMISSIONS, truncate};
 use crate::config::{Config, ConfigOverrides};
 use crate::core::clock::SystemClock;
 use crate::core::run_state::RunState;
@@ -408,7 +408,10 @@ async fn finish_tui_run(
         .map_err(|e| format!("tui run task failed: {e}"))?;
     match &complete.result {
         Ok(()) => append_tui_turn_result(app, &complete.state),
-        Err(e) => app.add_error(e.clone()),
+        Err(e) => {
+            app.fail_running_tool_calls("failed before result");
+            app.add_error(e.clone());
+        }
     }
     let continue_queue = matches!(
         (&complete.result, &complete.state.step),

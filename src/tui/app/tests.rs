@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::adapters::ExecJobState;
 
-use super::super::style::{wrap_by_display_width, SPINNER_FRAMES};
+use super::super::style::{SPINNER_FRAMES, wrap_by_display_width};
 use super::types::{PasteBlock, TuiPanel};
 use super::*;
 
@@ -352,6 +352,30 @@ fn slash_command_history_does_not_trap_arrow_keys_in_popup() {
         UserAction::None
     );
     assert_eq!(app.current_input(), "cmd after");
+}
+
+#[test]
+fn slash_completion_exits_history_navigation() {
+    let mut app = app();
+    app.replace_input_history_texts(["/he"]);
+
+    assert_eq!(
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        UserAction::None
+    );
+    assert_eq!(app.current_input(), "/he");
+
+    assert_eq!(
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        UserAction::None
+    );
+    assert_eq!(app.current_input(), "/help ");
+
+    assert_eq!(
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        UserAction::None
+    );
+    assert_eq!(app.current_input(), "/help ");
 }
 
 #[test]
@@ -751,6 +775,20 @@ fn running_tool_call_updates_existing_row() {
 }
 
 #[test]
+fn running_tool_call_can_be_failed_without_tool_end() {
+    let mut app = app();
+    app.set_status("running");
+    app.add_tool_call_started("call_1", "Bash(sleep 120)");
+
+    app.fail_running_tool_calls("failed before result");
+    let screen = render_text(&app, 120, 22);
+    assert_eq!(screen.matches("Bash(sleep 120)").count(), 1, "{screen}");
+    assert!(screen.contains("⏺ Bash(sleep 120) ✗"), "{screen}");
+    assert!(screen.contains("failed before result"), "{screen}");
+    assert!(app.running_tools.is_empty());
+}
+
+#[test]
 fn mouse_wheel_scrolls_messages_panel() {
     use crossterm::event::{MouseEvent, MouseEventKind};
     let mut app = app();
@@ -991,8 +1029,8 @@ fn job(id: &str, state: ExecJobState, code: Option<i32>, command: &str) -> ShJob
 }
 
 fn render_text(app: &TuiApp, width: u16, height: u16) -> String {
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();

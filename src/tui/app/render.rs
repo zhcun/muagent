@@ -3,24 +3,24 @@
 //! sub-renderers it calls. Lives in its own `impl TuiApp` block — pure
 //! presentation, no input handling, no state mutation.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap};
-use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::adapters::ExecJobState;
 
+use super::super::ChatRole;
 use super::super::style::{
     dim_dot_separator, format_bytes, format_chars, format_elapsed, format_turn_meta,
     job_state_label, job_state_style, one_line, plural, push_code_block_line, push_code_fence_rule,
     push_wrapped_message_line, role_body_style, role_style, selected_window_start,
     spinner_frame_at, text_lines,
 };
-use super::super::ChatRole;
-use super::types::TuiPanel;
 use super::TuiApp;
+use super::types::TuiPanel;
 
 /// Build the `[████░░░░] 32% / 128k` fill bar shown in the footer.
 /// Color shifts yellow above 80% and red above 95% to flag context pressure
