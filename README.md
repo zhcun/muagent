@@ -31,6 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/zhcun/muagent/main/scripts/install.
 
 ### Source
 
+Prerequisites: Rust/Cargo. The local npm shim also needs Node.js 16+ and npm.
+
 Build and install from a checkout:
 
 ```bash
