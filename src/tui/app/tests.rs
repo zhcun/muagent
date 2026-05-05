@@ -558,7 +558,7 @@ fn render_snapshot_shows_footer_and_paste_summary() {
     assert!(screen.contains("next prompt"), "{screen}");
     assert!(screen.contains("1/3 queued"), "{screen}");
     assert!(screen.contains("[pasted 3 lines, 13 chars]"), "{screen}");
-    assert!(screen.contains("sh 1"), "{screen}");
+    assert!(screen.contains("1 job"), "{screen}");
     assert!(screen.contains("Ctrl-B"), "{screen}");
     assert!(screen.contains("Enter"), "{screen}");
 }
@@ -610,6 +610,51 @@ fn scrolled_back_view_is_preserved_when_new_messages_arrive() {
         .expect("anchor line in before");
     assert!(after.contains(anchor_line), "{after}");
     assert!(!after.contains("STREAMED"), "{after}");
+}
+
+#[test]
+fn assistant_deltas_update_one_live_message() {
+    let mut app = app();
+    app.set_status("running");
+    app.add_assistant_delta("hel");
+    app.add_assistant_delta("lo");
+
+    assert_eq!(app.messages.len(), 1);
+    assert_eq!(app.messages[0].role, ChatRole::Assistant);
+    assert_eq!(app.messages[0].text, "hello");
+    let screen = render_text(&app, 120, 22);
+    assert!(screen.contains("Responding"), "{screen}");
+
+    app.finish_assistant_stream("hello");
+    assert_eq!(app.messages.len(), 1);
+    assert_eq!(app.messages[0].text, "hello");
+}
+
+#[test]
+fn final_assistant_replaces_streamed_text_without_duplicate() {
+    let mut app = app();
+    app.add_assistant_delta("draft");
+    app.finish_assistant_stream("final");
+
+    assert_eq!(app.messages.len(), 1);
+    assert_eq!(app.messages[0].text, "final");
+
+    app.finish_assistant_stream("next");
+    assert_eq!(app.messages.len(), 2);
+    assert_eq!(app.messages[1].text, "next");
+}
+
+#[test]
+fn assistant_stream_reset_discards_uncommitted_partial() {
+    let mut app = app();
+    app.add_assistant_delta("partial");
+    app.discard_assistant_stream();
+
+    assert!(app.messages.is_empty());
+
+    app.add_assistant_delta("tool-only draft");
+    app.finish_assistant_stream("");
+    assert!(app.messages.is_empty());
 }
 
 #[test]
@@ -708,6 +753,7 @@ fn running_status_renders_spinner_with_meta() {
     assert!(has_spinner, "{screen}");
     assert!(screen.contains("Thinking"), "{screen}");
     assert!(screen.contains("1.2k tok"), "{screen}");
+    assert!(screen.contains("Ctrl-B jobs"), "{screen}");
 }
 
 #[test]
@@ -821,7 +867,13 @@ fn context_bar_renders_when_window_is_set() {
     assert!(screen.contains("["), "{screen}");
     assert!(screen.contains("32%"), "{screen}");
     assert!(screen.contains("/128k"), "{screen}");
-    assert!(!screen.contains("ctx "), "{screen}");
+    assert!(screen.contains("ctx "), "{screen}");
+    let footer = screen
+        .lines()
+        .filter(|line| !line.is_empty())
+        .next_back()
+        .unwrap_or("");
+    assert!(footer.ends_with("32%"), "{screen}");
     assert!(!screen.contains(" tok"), "{screen}");
 }
 
@@ -907,6 +959,38 @@ fn tool_calls_after_assistant_render_without_role_bar() {
 }
 
 #[test]
+fn progress_blocks_render_as_structured_status_not_chat_text() {
+    let mut app = app();
+    app.add_assistant(
+        "GOAL: answer what the project does\nSTATE: read AGENTS.md\nNEXT: read README",
+    );
+    app.add_assistant(
+        "GOAL: answer what the project does\nSTATE: README says it finds pets\nNEXT: summarize in Chinese",
+    );
+    app.add_assistant("This is the final answer.");
+
+    let screen = render_text(&app, 120, 22);
+    assert!(screen.contains("Task"), "{screen}");
+    assert!(screen.contains("Update"), "{screen}");
+    assert!(
+        screen.contains("Goal  answer what the project does"),
+        "{screen}"
+    );
+    assert!(screen.contains("State read AGENTS.md"), "{screen}");
+    assert!(
+        screen.contains("State README says it finds pets"),
+        "{screen}"
+    );
+    assert!(screen.contains("Next  summarize in Chinese"), "{screen}");
+    assert_eq!(
+        screen.matches("Goal  answer what the project does").count(),
+        1
+    );
+    assert!(!screen.contains("GOAL:"), "{screen}");
+    assert!(screen.contains("▎ This is the final answer."), "{screen}");
+}
+
+#[test]
 fn tool_call_diff_stats_render_as_continuation_line() {
     let mut app = app();
     app.add_tool_call("Update(src/tui.rs)", true, "", Some("+3 -1".into()));
@@ -969,7 +1053,7 @@ fn render_snapshot_shows_job_list_and_detail() {
     );
 
     let list = render_text(&app, 100, 22);
-    assert!(list.contains("sh jobs"), "{list}");
+    assert!(list.contains("background jobs"), "{list}");
     assert!(list.contains("running"), "{list}");
     assert!(list.contains("sleep 10"), "{list}");
     assert!(list.contains("exit 0"), "{list}");
@@ -979,8 +1063,8 @@ fn render_snapshot_shows_job_list_and_detail() {
         UserAction::None
     );
     let detail = render_text(&app, 100, 22);
-    assert!(detail.contains("sh job"), "{detail}");
-    assert!(detail.contains("sh_1"), "{detail}");
+    assert!(detail.contains("background job"), "{detail}");
+    assert!(!detail.contains("sh_1"), "{detail}");
     assert!(detail.contains("$ sleep 10"), "{detail}");
     assert!(detail.contains("out 12B"), "{detail}");
 }

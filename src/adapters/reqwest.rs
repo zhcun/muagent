@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 use crate::core::cancel::CancelToken;
 use crate::core::net::{HttpMethod, HttpReq, HttpResp, NetEgress, NetErr};
@@ -31,6 +32,26 @@ impl ReqwestEgress {
 #[async_trait]
 impl NetEgress for ReqwestEgress {
     async fn http(&self, req: HttpReq, cancel: CancelToken) -> Result<HttpResp, NetErr> {
+        self.http_inner(req, cancel, None).await
+    }
+
+    async fn http_with_body_chunks(
+        &self,
+        req: HttpReq,
+        cancel: CancelToken,
+        chunks: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    ) -> Result<HttpResp, NetErr> {
+        self.http_inner(req, cancel, chunks).await
+    }
+}
+
+impl ReqwestEgress {
+    async fn http_inner(
+        &self,
+        req: HttpReq,
+        cancel: CancelToken,
+        chunks: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    ) -> Result<HttpResp, NetErr> {
         if cancel.triggered() {
             return Err(NetErr::Cancelled);
         }
@@ -76,6 +97,9 @@ impl NetEgress for ReqwestEgress {
             let Some(chunk) = chunk else {
                 break;
             };
+            if let Some(tx) = &chunks {
+                let _ = tx.send(chunk.to_vec());
+            }
             body.extend_from_slice(&chunk);
         }
 

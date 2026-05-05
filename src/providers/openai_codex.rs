@@ -9,11 +9,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 use crate::core::cancel::CancelToken;
 use crate::core::error::ModelError;
 use crate::core::net::{check_model_status, net_err_to_model, HttpMethod, HttpReq, NetEgress};
-use crate::core::prelude::{LlmCaps, ModelAdapter, ModelReply, ModelRequest, TokenUsage};
+use crate::core::prelude::{
+    LlmCaps, ModelAdapter, ModelReply, ModelRequest, ModelStreamEvent, TokenUsage,
+};
 use crate::core::thinking::{ThinkingEffort, ThinkingMode, ThinkingSupport};
 use crate::core::tool::{PendingCall, ToolDescriptor, TOOL_PROTOCOL_ERROR_TOOL};
 use crate::core::types::{Content, ContentPart, Message, ObsKind};
@@ -65,7 +68,7 @@ fn codex_caps() -> LlmCaps {
         native_tool_use: true,
         json_schema_mode: true,
         vision: true,
-        streaming: false,
+        streaming: true,
         ctx_len: 272_000,
         prompt_cache: true,
         thinking: ThinkingSupport::NoReplay,
@@ -79,6 +82,27 @@ impl ModelAdapter for OpenAiCodexAdapter {
     }
 
     async fn turn(&self, req: ModelRequest, cancel: CancelToken) -> Result<ModelReply, ModelError> {
+        self.turn_inner(req, cancel, None).await
+    }
+
+    async fn turn_stream(
+        &self,
+        req: ModelRequest,
+        cancel: CancelToken,
+        stream: Option<mpsc::UnboundedSender<ModelStreamEvent>>,
+    ) -> Result<ModelReply, ModelError> {
+        let stream = req.stream.then_some(stream).flatten();
+        self.turn_inner(req, cancel, stream).await
+    }
+}
+
+impl OpenAiCodexAdapter {
+    async fn turn_inner(
+        &self,
+        req: ModelRequest,
+        cancel: CancelToken,
+        stream: Option<mpsc::UnboundedSender<ModelStreamEvent>>,
+    ) -> Result<ModelReply, ModelError> {
         let token = self.auth.resolve(self.net.clone(), cancel.child()).await?;
 
         let filtered = crate::core::wire::prepare_messages_for_caps(&req.messages, &self.caps);
@@ -140,21 +164,39 @@ impl ModelAdapter for OpenAiCodexAdapter {
             }
         }
 
-        let resp = self
-            .net
-            .http(
-                HttpReq {
-                    method: HttpMethod::Post,
-                    url: resolve_codex_url(&self.base_url),
-                    headers,
-                    body: Some(body_bytes),
-                },
-                cancel,
-            )
-            .await
-            .map_err(net_err_to_model)?;
+        let req = HttpReq {
+            method: HttpMethod::Post,
+            url: resolve_codex_url(&self.base_url),
+            headers,
+            body: Some(body_bytes),
+        };
+        let resp = self.http_codex(req, cancel, stream).await?;
         check_model_status(&resp)?;
         parse_codex_sse(&resp.body)
+    }
+
+    async fn http_codex(
+        &self,
+        req: HttpReq,
+        cancel: CancelToken,
+        stream: Option<mpsc::UnboundedSender<ModelStreamEvent>>,
+    ) -> Result<crate::core::net::HttpResp, ModelError> {
+        let Some(stream) = stream else {
+            return self.net.http(req, cancel).await.map_err(net_err_to_model);
+        };
+        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let forwarder = tokio::spawn(async move {
+            let mut pump = CodexSseDeltaPump::default();
+            while let Some(chunk) = chunk_rx.recv().await {
+                pump.push_chunk(&chunk, &stream);
+            }
+        });
+        let resp = self
+            .net
+            .http_with_body_chunks(req, cancel, Some(chunk_tx))
+            .await;
+        let _ = forwarder.await;
+        resp.map_err(net_err_to_model)
     }
 }
 
@@ -411,6 +453,24 @@ struct ToolAccum {
     arguments: String,
 }
 
+#[derive(Default)]
+struct CodexSseDeltaPump {
+    buffer: Vec<u8>,
+}
+
+impl CodexSseDeltaPump {
+    fn push_chunk(&mut self, chunk: &[u8], stream: &mpsc::UnboundedSender<ModelStreamEvent>) {
+        self.buffer.extend_from_slice(chunk);
+        while let Some((end, delimiter_len)) = find_sse_event_end(&self.buffer) {
+            let event = self.buffer.drain(..end + delimiter_len).collect::<Vec<_>>();
+            let event = &event[..end];
+            if let Some(value) = sse_event_value(event) {
+                emit_stream_delta(&value, stream);
+            }
+        }
+    }
+}
+
 fn parse_codex_sse(body: &[u8]) -> Result<ModelReply, ModelError> {
     let events = sse_events(body);
     if events.is_empty() {
@@ -567,21 +627,59 @@ fn sse_events(body: &[u8]) -> Vec<Value> {
     let text = String::from_utf8_lossy(body).replace("\r\n", "\n");
     let mut out = Vec::new();
     for chunk in text.split("\n\n") {
-        let data = chunk
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(data) {
+        if let Some(value) = sse_event_value(chunk.as_bytes()) {
             out.push(value);
         }
     }
     out
+}
+
+fn find_sse_event_end(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = buffer
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|idx| (idx, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|idx| (idx, 4));
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn sse_event_value(event: &[u8]) -> Option<Value> {
+    let text = String::from_utf8_lossy(event).replace("\r\n", "\n");
+    let data = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    serde_json::from_str::<Value>(data).ok()
+}
+
+fn emit_stream_delta(event: &Value, stream: &mpsc::UnboundedSender<ModelStreamEvent>) {
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    if !matches!(
+        event_type,
+        "response.output_text.delta" | "response.refusal.delta"
+    ) {
+        return;
+    }
+    let Some(delta) = event.get("delta").and_then(Value::as_str) else {
+        return;
+    };
+    if !delta.is_empty() {
+        let _ = stream.send(ModelStreamEvent::TextDelta(delta.to_string()));
+    }
 }
 
 fn message_item_text(item: &Value) -> String {
@@ -792,6 +890,28 @@ data: [DONE]
         assert_eq!(reply.usage.prompt_tokens, 10);
         assert_eq!(reply.usage.cache_read_tokens, 3);
         assert_eq!(reply.usage.thinking_tokens, 1);
+    }
+
+    #[test]
+    fn codex_caps_advertise_streaming() {
+        assert!(codex_caps().streaming);
+    }
+
+    #[test]
+    fn codex_sse_delta_pump_handles_split_chunks() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut pump = CodexSseDeltaPump::default();
+
+        pump.push_chunk(br#"data: {"type":"response.output_text.delta","#, &tx);
+        assert!(rx.try_recv().is_err());
+        pump.push_chunk(br#""delta":"hel"}"#, &tx);
+        assert!(rx.try_recv().is_err());
+        pump.push_chunk(b"\n\n", &tx);
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ModelStreamEvent::TextDelta("hel".into())
+        );
     }
 
     #[test]

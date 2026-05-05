@@ -47,6 +47,7 @@ pub struct TuiApp {
     pub(in crate::tui::app) selected_job: usize,
     pub(in crate::tui::app) job_detail_scroll: u16,
     pub(in crate::tui::app) messages: Vec<ChatMessage>,
+    pub(in crate::tui::app) streaming_assistant: Option<usize>,
     pub(in crate::tui::app) running_tools: Vec<(String, usize)>,
     pub(in crate::tui::app) scroll_back: usize,
     /// Set when the current status entered "running"; cleared on idle. The
@@ -64,8 +65,7 @@ pub struct TuiApp {
     /// partially typed command. Cleared on the next edit / completion.
     pub(in crate::tui::app) slash_popup_suppressed: bool,
     /// Total context window in tokens for the active model. `None` hides
-    /// the header fill bar — host code provides this when the model's
-    /// window is known.
+    /// the footer fill bar.
     pub(in crate::tui::app) context_window: Option<u32>,
     /// Prompt tokens sent on the most recent model step (i.e. the current
     /// context fill, not a cumulative session total). Set by host code
@@ -92,6 +92,7 @@ impl TuiApp {
             selected_job: 0,
             job_detail_scroll: 0,
             messages: Vec::new(),
+            streaming_assistant: None,
             running_tools: Vec::new(),
             scroll_back: 0,
             turn_started: None,
@@ -177,6 +178,13 @@ impl TuiApp {
         }
     }
 
+    fn set_activity_phase(&mut self, phase: &'static str) {
+        if self.activity.last().is_some_and(|entry| entry == phase) {
+            return;
+        }
+        self.add_activity(phase);
+    }
+
     pub fn restore_submission(&mut self, submission: UserSubmission) {
         self.set_input_draft(InputDraft {
             input_text: submission.input_text,
@@ -194,11 +202,81 @@ impl TuiApp {
     }
 
     pub fn add_user(&mut self, text: impl Into<String>) {
+        self.streaming_assistant = None;
         self.add(ChatRole::User, text);
     }
 
     pub fn add_assistant(&mut self, text: impl Into<String>) {
         self.add(ChatRole::Assistant, text);
+    }
+
+    pub fn add_assistant_delta(&mut self, delta: impl AsRef<str>) {
+        let delta = delta.as_ref();
+        if delta.is_empty() {
+            return;
+        }
+        self.set_activity_phase("responding");
+        let idx = match self.streaming_assistant.filter(
+            |idx| matches!(self.messages.get(*idx), Some(msg) if msg.role == ChatRole::Assistant),
+        ) {
+            Some(idx) => idx,
+            None => {
+                let idx = self.add(ChatRole::Assistant, "");
+                self.streaming_assistant = Some(idx);
+                idx
+            }
+        };
+        if let Some(message) = self.messages.get_mut(idx) {
+            let before = logical_line_count(&message.text);
+            message.text.push_str(delta);
+            if self.scroll_back > 0 {
+                let after = logical_line_count(&message.text);
+                self.scroll_back = self
+                    .scroll_back
+                    .saturating_add(after.saturating_sub(before));
+            }
+        }
+    }
+
+    pub fn finish_assistant_stream(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if let Some(idx) = self.streaming_assistant.take() {
+            if let Some(message) = self.messages.get_mut(idx) {
+                if message.role == ChatRole::Assistant {
+                    if text.trim().is_empty() {
+                        self.remove_message(idx);
+                        return;
+                    }
+                    let before = logical_line_count(&message.text);
+                    message.text = text;
+                    if self.scroll_back > 0 {
+                        let after = logical_line_count(&message.text);
+                        if after >= before {
+                            self.scroll_back = self
+                                .scroll_back
+                                .saturating_add(after.saturating_sub(before));
+                        } else {
+                            self.scroll_back = self
+                                .scroll_back
+                                .saturating_sub(before.saturating_sub(after));
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        if !text.trim().is_empty() {
+            self.add(ChatRole::Assistant, text);
+        }
+    }
+
+    pub fn discard_assistant_stream(&mut self) {
+        let Some(idx) = self.streaming_assistant.take() else {
+            return;
+        };
+        if matches!(self.messages.get(idx), Some(message) if message.role == ChatRole::Assistant) {
+            self.remove_message(idx);
+        }
     }
 
     pub fn add_system(&mut self, text: impl Into<String>) {
@@ -300,6 +378,7 @@ impl TuiApp {
 
     pub fn clear_messages(&mut self) {
         self.messages.clear();
+        self.streaming_assistant = None;
         self.running_tools.clear();
         self.scroll_back = 0;
         self.panel = TuiPanel::Chat;
@@ -332,6 +411,24 @@ impl TuiApp {
         self.messages.push(ChatMessage { role, text });
         self.messages.len() - 1
     }
+
+    fn remove_message(&mut self, idx: usize) {
+        if idx >= self.messages.len() {
+            return;
+        }
+        let removed = self.messages.remove(idx);
+        if self.scroll_back > 0 {
+            let removed_lines = logical_line_count(&removed.text) + 1;
+            self.scroll_back = self.scroll_back.saturating_sub(removed_lines);
+        }
+        self.running_tools
+            .retain(|(_, message_idx)| *message_idx != idx);
+        for (_, message_idx) in &mut self.running_tools {
+            if *message_idx > idx {
+                *message_idx -= 1;
+            }
+        }
+    }
 }
 
 fn completed_tool_call_text(display: &str, ok: bool, brief: &str, extra: Option<&str>) -> String {
@@ -351,6 +448,10 @@ fn completed_tool_call_text(display: &str, ok: bool, brief: &str, extra: Option<
         text.push_str(extra);
     }
     text
+}
+
+fn logical_line_count(text: &str) -> usize {
+    text.lines().count().max(1)
 }
 
 #[cfg(test)]

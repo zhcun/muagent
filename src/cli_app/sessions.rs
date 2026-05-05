@@ -14,10 +14,11 @@ use crossterm::{
 use crate::cli_app::state::{ensure_workspace_root, resume_session_state, workspace_root};
 #[cfg(feature = "tui")]
 use crate::cli_app::stdio_is_tty;
-use crate::cli_app::{now_ms, short_uuid, truncate};
+use crate::cli_app::{now_ms, truncate};
 use crate::config::Config;
 use crate::core::clock::SystemClock;
 use crate::core::run_state::RunState;
+use crate::core::store::RunStatus;
 use crate::sessions::manager::SessionInfo;
 use crate::setup;
 
@@ -91,8 +92,8 @@ pub fn print_session_list(sessions: &[SessionInfo], show_workspace: bool) {
         println!("{line}");
         if show_workspace {
             println!(
-                "    root={}",
-                s.workspace_root.as_deref().unwrap_or("(unknown)")
+                "      workspace {}",
+                compact_session_path(s.workspace_root.as_deref().unwrap_or("(unknown)"), 96)
             );
         }
     }
@@ -158,10 +159,16 @@ fn interactive_session_picker(
             continue;
         }
         match key.code {
-            CtKeyCode::Up => selected = selected.saturating_sub(1),
-            CtKeyCode::Down => {
+            CtKeyCode::Up | CtKeyCode::Char('k') => selected = selected.saturating_sub(1),
+            CtKeyCode::Down | CtKeyCode::Char('j') => {
                 selected = (selected + 1).min(sessions.len().saturating_sub(1));
             }
+            CtKeyCode::PageUp => selected = selected.saturating_sub(10),
+            CtKeyCode::PageDown => {
+                selected = (selected + 10).min(sessions.len().saturating_sub(1));
+            }
+            CtKeyCode::Home => selected = 0,
+            CtKeyCode::End => selected = sessions.len().saturating_sub(1),
             CtKeyCode::Enter => {
                 println!();
                 return Ok(selected);
@@ -197,18 +204,29 @@ fn render_session_picker(
     )?;
 
     let mut lines = 0usize;
+    let (_, height) = ct_terminal::size().unwrap_or((80, 24));
+    let rows_available = (height as usize).saturating_sub(3).max(4);
+    let item_rows = if show_workspace { 2 } else { 1 };
+    let visible_items = (rows_available / item_rows)
+        .clamp(3, 20)
+        .min(sessions.len());
+    let start = picker_window_start(selected, visible_items, sessions.len());
+    let end = (start + visible_items).min(sessions.len());
+
     println!(
-        "Select session with ↑/↓, Enter to resume, q/Esc to cancel ({} found):",
+        "Resume session · ↑/↓ or j/k · PgUp/PgDn · Enter resume · q/Esc cancel · {}-{} of {}",
+        start + 1,
+        end,
         sessions.len()
     );
     lines += 1;
-    for (idx, session) in sessions.iter().enumerate() {
+    for (idx, session) in sessions.iter().enumerate().skip(start).take(visible_items) {
         println!("{}", session_summary_line(idx, session, idx == selected));
         lines += 1;
         if show_workspace {
             println!(
-                "    root={}",
-                session.workspace_root.as_deref().unwrap_or("(unknown)")
+                "      workspace {}",
+                compact_session_path(session.workspace_root.as_deref().unwrap_or("(unknown)"), 96)
             );
             lines += 1;
         }
@@ -218,21 +236,46 @@ fn render_session_picker(
 }
 
 pub fn session_summary_line(idx: usize, session: &SessionInfo, selected: bool) -> String {
-    let marker = if selected { ">" } else { " " };
+    let marker = if selected { "▎" } else { " " };
     let title = session
         .title
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("(no user prompt)");
+    let run_label = if session.run_count == 1 {
+        "run"
+    } else {
+        "runs"
+    };
     format!(
-        "{marker} {:>2}. {:<18} {:<10} runs={}  {}  [{}]",
+        "{marker} {:>2}  {:<64}  {} · {} · {} {} · id {}",
         idx + 1,
+        truncate(title, 64),
         session_time_label(session.updated_ms),
-        format!("{:?}", session.latest_status),
+        status_label(session.latest_status),
         session.run_count,
-        truncate(title, 90),
-        short_uuid(&session.session_id.to_string())
+        run_label,
+        session.session_id
     )
+}
+
+fn picker_window_start(selected: usize, visible: usize, len: usize) -> usize {
+    if len == 0 || visible == 0 {
+        return 0;
+    }
+    let max_start = len.saturating_sub(visible);
+    selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(max_start)
+}
+
+fn status_label(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Active => "active",
+        RunStatus::Paused => "paused",
+        RunStatus::Done => "done",
+        RunStatus::Failed => "failed",
+    }
 }
 
 fn session_time_label(updated_ms: i64) -> String {
@@ -278,4 +321,83 @@ fn local_time_label(ms: i64) -> String {
         }
     }
     ms.to_string()
+}
+
+fn compact_session_path(path: &str, max_chars: usize) -> String {
+    if path.chars().count() <= max_chars {
+        return path.to_string();
+    }
+    let parts = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return truncate(path, max_chars);
+    }
+    let mut suffix = String::new();
+    for part in parts.iter().rev() {
+        let candidate = if suffix.is_empty() {
+            (*part).to_string()
+        } else {
+            format!("{part}/{suffix}")
+        };
+        if candidate.chars().count() + 4 > max_chars {
+            break;
+        }
+        suffix = candidate;
+    }
+    if suffix.is_empty() {
+        truncate(path, max_chars)
+    } else {
+        format!(".../{suffix}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::{compact_session_path, picker_window_start, session_summary_line};
+    use crate::core::store::RunStatus;
+    use crate::sessions::manager::SessionInfo;
+
+    #[test]
+    fn session_summary_prioritizes_title_and_copyable_id() {
+        let id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let session = SessionInfo {
+            session_id: id,
+            run_count: 2,
+            updated_ms: 0,
+            latest_status: RunStatus::Done,
+            workspace_root: Some("/workspace/project".into()),
+            title: Some("Investigate TUI display polish".into()),
+        };
+
+        let line = session_summary_line(0, &session, true);
+        assert!(line.starts_with("▎  1"), "{line}");
+        assert!(line.contains("Investigate TUI display polish"), "{line}");
+        assert!(line.contains("done"), "{line}");
+        assert!(line.contains("2 runs"), "{line}");
+        assert!(
+            line.contains("id 11111111-2222-3333-4444-555555555555"),
+            "{line}"
+        );
+        assert!(!line.contains("runs="), "{line}");
+    }
+
+    #[test]
+    fn picker_window_tracks_selection_near_bottom() {
+        assert_eq!(picker_window_start(0, 5, 20), 0);
+        assert_eq!(picker_window_start(4, 5, 20), 0);
+        assert_eq!(picker_window_start(5, 5, 20), 1);
+        assert_eq!(picker_window_start(19, 5, 20), 15);
+    }
+
+    #[test]
+    fn compact_session_path_keeps_tail() {
+        assert_eq!(
+            compact_session_path("/very/long/path/to/a/workspace/project/frontend", 28),
+            ".../project/frontend"
+        );
+    }
 }

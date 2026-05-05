@@ -428,7 +428,9 @@ fn drain_tui_run_updates(run: Option<&mut TuiInflightRun>, app: &mut TuiApp) {
     while let Ok(update) = run.updates.try_recv() {
         match update {
             TuiUpdate::Activity(text) => app.add_activity(text),
-            TuiUpdate::Assistant(text) => app.add_assistant(text),
+            TuiUpdate::AssistantDelta(text) => app.add_assistant_delta(text),
+            TuiUpdate::AssistantStreamReset => app.discard_assistant_stream(),
+            TuiUpdate::Assistant(text) => app.finish_assistant_stream(text),
             TuiUpdate::PromptTokens(tokens) => app.set_last_prompt_tokens(tokens),
             TuiUpdate::Tokens(delta) => app.add_turn_tokens(delta),
             TuiUpdate::ToolStart { call_id, display } => {
@@ -536,10 +538,10 @@ async fn refresh_tui_sh_jobs(app: &mut TuiApp, runtime: &ReplRuntime) {
 fn append_tui_turn_result(app: &mut TuiApp, state: &RunState) {
     match &state.step {
         Step::Done { final_text } => {
-            // Successful turns already streamed their assistant text via
-            // Event::AssistantMessage (see event_tui_updates). Only synthesise
-            // a placeholder when the model returned literally nothing so the
-            // user is not left staring at their own prompt.
+            // Successful turns render assistant text through live deltas and
+            // the final Event::AssistantMessage. Only synthesise a placeholder
+            // when the model returned literally nothing so the user is not
+            // left staring at their own prompt.
             if final_text.trim().is_empty() {
                 app.add_assistant("(no final text)");
             }

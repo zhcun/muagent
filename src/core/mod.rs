@@ -61,7 +61,7 @@ pub mod prelude {
             HookDecision, HookDispatcher, HookEventName, HookInput, HookOutput,
             HookPermissionDecision, HookSpecificOutput, NoopHookDispatcher, SessionStartSource,
         },
-        model::{LlmCaps, ModelAdapter, ModelReply, ModelRequest, TokenUsage},
+        model::{LlmCaps, ModelAdapter, ModelReply, ModelRequest, ModelStreamEvent, TokenUsage},
         net::{
             check_model_status, net_err_to_model, HttpMethod, HttpReq, HttpResp, NetEgress, NetErr,
         },

@@ -2,6 +2,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::core::cache::{CacheKeyStrategy, CachePolicy};
 use crate::core::cancel::CancelToken;
@@ -13,7 +14,7 @@ use crate::core::event::Event;
 use crate::core::hook::{
     HookDispatcher, HookEventName, HookInput, HookOutput, NoopHookDispatcher, SessionStartSource,
 };
-use crate::core::model::{ModelAdapter, ModelReply, ModelRequest};
+use crate::core::model::{ModelAdapter, ModelReply, ModelRequest, ModelStreamEvent};
 use crate::core::prompt::{
     adapt_tool_descriptors, append_section, blocks_from_active_set, cache_fingerprint,
     capability_hint, render_cacheable_blocks, render_runtime_blocks,
@@ -335,6 +336,18 @@ impl Runner {
 
     /// Run one FSM step.
     pub async fn step(&self, state: &mut RunState) -> Result<StepOutput, RuntimeError> {
+        self.step_with_model_stream(state, None).await
+    }
+
+    /// Run one FSM step, optionally letting streaming-capable model adapters
+    /// emit non-persistent text deltas to the host while the model call is
+    /// still in flight. The final assistant message is still committed
+    /// atomically after the full model reply returns.
+    pub async fn step_with_model_stream(
+        &self,
+        state: &mut RunState,
+        stream: Option<mpsc::UnboundedSender<ModelStreamEvent>>,
+    ) -> Result<StepOutput, RuntimeError> {
         let before_step = state.step.name();
         tracing::debug!(
             target: "muagent::runner",
@@ -357,7 +370,7 @@ impl Runner {
         } else {
             match state.step.clone() {
                 Step::Ready => self.on_ready(state).await,
-                Step::ModelTurn => self.on_model_turn(state).await,
+                Step::ModelTurn => self.on_model_turn(state, stream).await,
                 Step::ToolBatch { calls, cursor } => self.on_tool_batch(state, calls, cursor).await,
                 Step::ToolIntent { call, .. } => self.on_tool_intent_recover(state, call).await,
                 Step::Paused { .. } | Step::Done { .. } | Step::Failed { .. } => Ok(StepOutput {
@@ -422,6 +435,7 @@ impl Runner {
         &self,
         state: &RunState,
         req: ModelRequest,
+        stream: Option<mpsc::UnboundedSender<ModelStreamEvent>>,
     ) -> Result<ModelReply, RuntimeError> {
         let mut attempt: u32 = 1;
         let mut req = req;
@@ -455,9 +469,10 @@ impl Runner {
                 stream = req.stream,
                 "model attempt started"
             );
-            let turn_result = AssertUnwindSafe(self.model.turn(req.clone(), cancel))
-                .catch_unwind()
-                .await;
+            let turn_result =
+                AssertUnwindSafe(self.model.turn_stream(req.clone(), cancel, stream.clone()))
+                    .catch_unwind()
+                    .await;
             let turn_result = match turn_result {
                 Ok(r) => r,
                 Err(panic) => {
@@ -503,6 +518,7 @@ impl Runner {
                     if empty {
                         let e = ModelError::Transient("empty model response".into());
                         if attempt >= self.retry_policy.max_attempts {
+                            reset_model_stream(&stream);
                             return Err(e.into());
                         }
                         if !added_empty_reply_continuation
@@ -535,6 +551,7 @@ impl Runner {
                             reason = "empty_response",
                             "model retry scheduled"
                         );
+                        reset_model_stream(&stream);
                         self.clock.sleep(wait).await;
                         continue;
                     }
@@ -552,6 +569,7 @@ impl Runner {
                         duration_ms,
                         "model turn cancelled"
                     );
+                    reset_model_stream(&stream);
                     return Err(RuntimeError::Cancelled);
                 }
                 Err(e) => {
@@ -576,6 +594,7 @@ impl Runner {
                         "model turn failed"
                     );
                     if !retryable || attempt >= self.retry_policy.max_attempts {
+                        reset_model_stream(&stream);
                         return Err(e.into());
                     }
                     attempt += 1;
@@ -592,13 +611,18 @@ impl Runner {
                         reason = "provider_error",
                         "model retry scheduled"
                     );
+                    reset_model_stream(&stream);
                     self.clock.sleep(wait).await;
                 }
             }
         }
     }
 
-    async fn on_model_turn(&self, state: &mut RunState) -> Result<StepOutput, RuntimeError> {
+    async fn on_model_turn(
+        &self,
+        state: &mut RunState,
+        stream: Option<mpsc::UnboundedSender<ModelStreamEvent>>,
+    ) -> Result<StepOutput, RuntimeError> {
         let ats = self.fetch_active_tool_set(state).await;
         tracing::debug!(
             target: "muagent::runner",
@@ -627,9 +651,11 @@ impl Runner {
             Err(e) => return Err(e),
         };
 
-        let req = self.assemble_request(state, system, tools, &prompt_blocks);
+        let stream_model = stream.is_some() && model_caps.streaming;
+        let req = self.assemble_request(state, system, tools, &prompt_blocks, stream_model);
+        let stream = stream_model.then_some(stream).flatten();
 
-        let reply = match self.model_turn_with_retry(state, req).await {
+        let reply = match self.model_turn_with_retry(state, req, stream).await {
             Ok(reply) => reply,
             Err(RuntimeError::Cancelled) => return self.pause_with(state, pre_events).await,
             Err(RuntimeError::Store(e)) => return Err(RuntimeError::Store(e)),
@@ -763,6 +789,7 @@ impl Runner {
         system: String,
         tools: Vec<crate::core::tool::ToolDescriptor>,
         prompt_blocks: &[crate::core::prompt::PromptBlock],
+        stream: bool,
     ) -> ModelRequest {
         // L2 runtime facts. Keep minimal by default — day-level date.
         let facts = crate::core::prompt::RuntimeFacts {
@@ -791,7 +818,7 @@ impl Runner {
             messages,
             tools,
             temperature: None,
-            stream: false,
+            stream,
             cache: self.cache_policy,
             thinking: self.thinking_config.clone(),
             // Routing-affinity key. Strategy is picked at Runner build time;
@@ -1585,6 +1612,12 @@ fn find_orphan_tool_calls(history: &[Message]) -> Vec<String> {
         .into_iter()
         .filter(|id| !answered.contains(id))
         .collect()
+}
+
+fn reset_model_stream(stream: &Option<mpsc::UnboundedSender<ModelStreamEvent>>) {
+    if let Some(tx) = stream {
+        let _ = tx.send(ModelStreamEvent::Reset);
+    }
 }
 
 // =============== Builder ===============

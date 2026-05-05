@@ -768,10 +768,46 @@ fn pipe_kill_drain_grace() -> Duration {
 }
 
 fn render_command(spec: &CmdSpec) -> String {
+    if is_shell_bin(&spec.bin) {
+        if let Some(summary) = spec.stdin.as_deref().and_then(shell_stdin_summary) {
+            return summary;
+        }
+    }
     if spec.args.is_empty() {
         spec.bin.clone()
     } else {
         format!("{} {}", spec.bin, spec.args.join(" "))
+    }
+}
+
+fn is_shell_bin(bin: &str) -> bool {
+    bin.rsplit('/')
+        .next()
+        .is_some_and(|name| matches!(name, "bash" | "sh" | "zsh" | "fish" | "dash" | "ksh"))
+}
+
+fn shell_stdin_summary(stdin: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdin);
+    let commands = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    let first = commands.first().copied()?;
+    let mut summary = one_line(first, 90);
+    if commands.len() > 1 {
+        summary.push_str(" ...");
+    }
+    Some(summary)
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    let compact = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max {
+        compact
+    } else {
+        let keep = max.saturating_sub(3);
+        format!("{}...", compact.chars().take(keep).collect::<String>())
     }
 }
 
@@ -806,5 +842,22 @@ fn append_capped(dst: &mut Vec<u8>, bytes: &[u8], total: &mut u64, cap: u64) -> 
         dst.extend_from_slice(bytes);
         *total = next;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::render_command;
+    use crate::adapters::CmdSpec;
+
+    #[test]
+    fn render_command_summarizes_shell_stdin() {
+        let mut spec = CmdSpec::new("bash", Vec::new());
+        spec.stdin = Some(b"# comment\nfind src -type f\nwc -l src/lib.rs\n".to_vec());
+        spec.timeout = Duration::from_secs(30);
+
+        assert_eq!(render_command(&spec), "find src -type f ...");
     }
 }

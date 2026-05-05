@@ -83,7 +83,14 @@ pub fn sync_tui_runtime(app: &mut TuiApp, runtime: &ReplRuntime) {
             runtime.cfg.runtime.thinking_effort,
         ),
     );
-    app.set_context_window(runtime.cfg.model.capabilities.ctx_len);
+    app.set_context_window(
+        runtime
+            .cfg
+            .model
+            .capabilities
+            .ctx_len
+            .or(Some(runtime.cfg.compaction.max_tokens)),
+    );
     app.set_last_prompt_tokens(0);
 }
 

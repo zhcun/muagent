@@ -9,6 +9,7 @@ use crate::cli_app::image::user_content;
 use crate::cli_app::truncate;
 use crate::cli_app::DEFAULT_MAX_STEPS;
 use crate::core::event::Event;
+use crate::core::model::ModelStreamEvent;
 use crate::core::run_state::RunState;
 use crate::core::runner::Runner;
 use crate::core::step::{PauseReason, Step};
@@ -21,6 +22,8 @@ use crate::core::types::{Content, Message};
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub enum TuiUpdate {
     Activity(String),
+    AssistantDelta(String),
+    AssistantStreamReset,
     Assistant(String),
     /// Prompt tokens reported for the latest model request. This is the
     /// current context size for that request, unlike `RunState.usage`, which
@@ -118,7 +121,17 @@ pub async fn drive_until_terminal_with_updates(
         emit_running_tool_start(&updates, &state.step);
         let prompt_before = state.usage.tokens_prompt;
         let completion_before = state.usage.tokens_completion;
-        let out = runner.step(state).await.map_err(|e| {
+        let (stream_tx, stream_forwarder) = model_stream_forwarder(&updates, &state.step);
+        let step_result = if let Some(tx) = stream_tx.clone() {
+            runner.step_with_model_stream(state, Some(tx)).await
+        } else {
+            runner.step(state).await
+        };
+        drop(stream_tx);
+        if let Some(handle) = stream_forwarder {
+            let _ = handle.await;
+        }
+        let out = step_result.map_err(|e| {
             error!(?e, "runner step failed");
             format!("runner step failed: {e:?}")
         })?;
@@ -156,11 +169,40 @@ fn emit_running_tool_start(updates: &Option<mpsc::UnboundedSender<TuiUpdate>>, s
     send_tui_activity(updates, format!("Running {display}"));
 }
 
+fn model_stream_forwarder(
+    updates: &Option<mpsc::UnboundedSender<TuiUpdate>>,
+    step: &Step,
+) -> (
+    Option<mpsc::UnboundedSender<ModelStreamEvent>>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    if !matches!(step, Step::ModelTurn) {
+        return (None, None);
+    }
+    let Some(tui_tx) = updates.as_ref().cloned() else {
+        return (None, None);
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                ModelStreamEvent::TextDelta(text) => {
+                    let _ = tui_tx.send(TuiUpdate::AssistantDelta(text));
+                }
+                ModelStreamEvent::Reset => {
+                    let _ = tui_tx.send(TuiUpdate::AssistantStreamReset);
+                }
+            }
+        }
+    });
+    (Some(tx), Some(handle))
+}
+
 fn step_activity_label(step: &Step) -> &'static str {
     match step {
         Step::Ready => "preparing",
         Step::ModelTurn => "thinking",
-        Step::ToolBatch { .. } => "using tools",
+        Step::ToolBatch { .. } => "working",
         Step::ToolIntent { .. } => "checking tool result",
         Step::Paused {
             reason: PauseReason::HostRequested,

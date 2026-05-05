@@ -323,6 +323,8 @@ fn snapshot_ok(snap: crate::adapters::ExecJobSnapshot) -> ToolOk {
             "exit": snap.code,
             "stdout_bytes": snap.stdout_bytes,
             "stderr_bytes": snap.stderr_bytes,
+            "stdout_tail": String::from_utf8_lossy(&snap.stdout_tail),
+            "stderr_tail": String::from_utf8_lossy(&snap.stderr_tail),
             "output_truncated": snap.output_truncated,
             "elapsed_ms": snap.elapsed.as_millis() as u64,
             "command": snap.command,

@@ -16,17 +16,20 @@ pub fn event_tui_updates(ev: &Event) -> Vec<TuiUpdate> {
         Event::ToolCallStart { .. } | Event::ToolCallEnd { .. } => vec![],
         Event::StepAdvanced { to, .. } => vec![TuiUpdate::Activity(stage_label(to).into())],
         Event::AssistantMessage { text, .. } => {
-            // Stream every assistant turn into the chat panel as it arrives
-            // so the user sees intermediate reasoning instead of waiting until
-            // the run finishes. Empty-text turns (model called tools without
-            // speaking) only get an activity hint to avoid blank chat lines.
+            // Completed assistant messages are the durable version of any
+            // live deltas the TUI may already have rendered. Empty-text turns
+            // (model called tools without speaking) only get an activity hint
+            // to avoid blank chat lines.
             let trimmed = text.trim();
             if trimmed.is_empty() {
-                vec![TuiUpdate::Activity("assistant: (tool call only)".into())]
+                vec![
+                    TuiUpdate::AssistantStreamReset,
+                    TuiUpdate::Activity("assistant: (tool call only)".into()),
+                ]
             } else {
                 vec![
                     TuiUpdate::Assistant(text.clone()),
-                    TuiUpdate::Activity(format!("assistant: {}", truncate(trimmed, 120))),
+                    TuiUpdate::Activity(format!("responding: {}", truncate(trimmed, 120))),
                 ]
             }
         }
@@ -55,9 +58,8 @@ pub fn event_tui_updates(ev: &Event) -> Vec<TuiUpdate> {
         } else {
             "session ended: failed".into()
         })],
-        Event::SessionStart { .. } | Event::UserMessage { .. } | Event::AssistantDelta { .. } => {
-            vec![]
-        }
+        Event::AssistantDelta { text, .. } => vec![TuiUpdate::AssistantDelta(text.clone())],
+        Event::SessionStart { .. } | Event::UserMessage { .. } => vec![],
         Event::ToolIntentRecovered { .. } => {
             vec![TuiUpdate::Activity("tool intent recovered".into())]
         }
@@ -81,7 +83,7 @@ pub fn tool_display_label(tool: &str, args: &serde_json::Value) -> String {
         v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
     }
     let (display_name, body) = match tool {
-        "sh_exec" => ("Bash", sh_exec_args_label(args)),
+        "sh_exec" => return sh_exec_display_label(args),
         "fs_read" => ("Read", file_arg_label(args, "uri")),
         "fs_write" => ("Write", write_arg_label(args)),
         "fs_edit" => ("Update", edit_arg_label(args)),
@@ -108,10 +110,20 @@ pub fn tool_display_label(tool: &str, args: &serde_json::Value) -> String {
     format!("{display_name}({body})")
 }
 
+fn sh_exec_display_label(args: &Value) -> String {
+    match args.get("action").and_then(Value::as_str) {
+        Some("wait") => "Wait(background job)".into(),
+        Some("poll") => "Check(background job)".into(),
+        Some("kill") => "Stop(background job)".into(),
+        Some(_) => format!("Job({})", sh_exec_args_label(args)),
+        None => format!("Bash({})", sh_exec_args_label(args)),
+    }
+}
+
 fn stage_label(to: &str) -> &'static str {
     match to {
         "model_turn" => "thinking",
-        "tool_batch" => "using tools",
+        "tool_batch" => "working",
         "tool_intent" => "checking tool result",
         _ => "working",
     }
@@ -128,20 +140,73 @@ fn display_file_uri(raw: &str) -> String {
     let Some(rest) = raw.strip_prefix("file://") else {
         return raw.to_string();
     };
-    if let Some(localhost) = rest.strip_prefix("localhost/") {
+    let path = if let Some(localhost) = rest.strip_prefix("localhost/") {
         format!("/{localhost}")
     } else {
         rest.to_string()
+    };
+    compact_display_path(&path)
+}
+
+fn compact_display_path(path: &str) -> String {
+    if let Ok(cwd) = std::env::current_dir() {
+        let path_buf = std::path::Path::new(path);
+        if let Ok(rest) = path_buf.strip_prefix(&cwd) {
+            if !rest.as_os_str().is_empty() {
+                return rest.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    let home_short = shorten_home(path);
+    let parts = home_short
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != "~")
+        .collect::<Vec<_>>();
+    if home_short.chars().count() <= 64 && parts.len() <= 6 {
+        return home_short;
+    }
+    let keep = parts.len().min(5);
+    let suffix = parts[parts.len().saturating_sub(keep)..].join("/");
+    if home_short.starts_with("~/") {
+        format!("~/.../{suffix}")
+    } else {
+        format!(".../{suffix}")
+    }
+}
+
+fn shorten_home(path: &str) -> String {
+    let Some(home) = std::env::var_os("HOME").and_then(|home| home.into_string().ok()) else {
+        return path.to_string();
+    };
+    if home == "/" || !path.starts_with(&home) {
+        return path.to_string();
+    }
+    match path.strip_prefix(&home) {
+        Some("") => "~".into(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
     }
 }
 
 fn sh_exec_args_label(args: &Value) -> String {
     if let Some(action) = args.get("action").and_then(Value::as_str) {
-        let job_id = args.get("job_id").and_then(Value::as_str).unwrap_or("");
-        return one_line(&format!("{action} {job_id}"), 96);
+        return match action {
+            "wait" => "wait for background job".into(),
+            "poll" => "check background job".into(),
+            "kill" => "stop background job".into(),
+            other => one_line(&format!("{other} background job"), 96),
+        };
     }
 
     let bin = args.get("bin").and_then(Value::as_str).unwrap_or("");
+    let stdin = args.get("stdin").and_then(Value::as_str);
+    if is_shell_bin(bin) {
+        if let Some(summary) = stdin.and_then(shell_stdin_summary) {
+            return summary;
+        }
+    }
+
     let mut parts = Vec::new();
     if !bin.is_empty() {
         parts.push(bin.to_string());
@@ -154,13 +219,33 @@ fn sh_exec_args_label(args: &Value) -> String {
         );
     }
     let mut label = parts.join(" ");
-    if let Some(stdin) = args.get("stdin").and_then(Value::as_str) {
+    if let Some(stdin) = stdin {
         if !label.is_empty() {
             label.push_str("; ");
         }
         label.push_str(&format!("stdin {} chars", stdin.chars().count()));
     }
     one_line(&label, 96)
+}
+
+fn is_shell_bin(bin: &str) -> bool {
+    bin.rsplit('/')
+        .next()
+        .is_some_and(|name| matches!(name, "bash" | "sh" | "zsh" | "fish" | "dash" | "ksh"))
+}
+
+fn shell_stdin_summary(stdin: &str) -> Option<String> {
+    let commands = stdin
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    let first = commands.first().copied()?;
+    let mut summary = one_line(first, 90);
+    if commands.len() > 1 {
+        summary.push_str(" …");
+    }
+    Some(summary)
 }
 
 fn write_arg_label(args: &Value) -> String {
@@ -243,18 +328,52 @@ pub fn tool_result_extra_line(tool: &str, detail: &serde_json::Value) -> Option<
             let exit = n(detail, "exit");
             let stdout = n(detail, "stdout_bytes").unwrap_or(0);
             let stderr = n(detail, "stderr_bytes").unwrap_or(0);
+            let command = detail
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let stdout_tail = detail
+                .get("stdout_tail")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let stderr_tail = detail
+                .get("stderr_tail")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             let state = detail
                 .get("state")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            match (exit, state.is_empty()) {
-                (Some(code), _) => Some(format!("exit {code} · out {stdout}B · err {stderr}B")),
-                (None, false) => Some(format!("{state} · out {stdout}B · err {stderr}B")),
-                (None, true) => None,
+            let status = match (exit, state.is_empty()) {
+                (Some(code), _) => format!("exit {code}"),
+                (None, false) => state.to_string(),
+                (None, true) => return None,
+            };
+            let mut parts = Vec::new();
+            if !command.trim().is_empty() {
+                parts.push(one_line(command, 56));
             }
+            parts.push(format!("{status} · out {stdout}B · err {stderr}B"));
+            if let Some(tail) = output_tail_summary("out", stdout_tail) {
+                parts.push(tail);
+            }
+            if let Some(tail) = output_tail_summary("err", stderr_tail) {
+                parts.push(tail);
+            }
+            Some(one_line(&parts.join(" · "), 160))
         }
         _ => None,
     }
+}
+
+fn output_tail_summary(label: &str, text: &str) -> Option<String> {
+    let compact = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    (!compact.is_empty()).then(|| format!("{label}: {}", one_line(&compact, 64)))
 }
 
 #[cfg(test)]
@@ -276,11 +395,46 @@ mod tests {
         );
         assert_eq!(
             tool_display_label(
+                "fs_read",
+                &json!({"uri":"file:///opt/work/findpet/frontend/src/app/pets/page.tsx"})
+            ),
+            "Read(.../frontend/src/app/pets/page.tsx)"
+        );
+        assert_eq!(
+            tool_display_label(
                 "sh_exec",
                 &json!({"bin":"cargo","args":["test","--lib"],"timeout_ms":30000})
             ),
             "Bash(cargo test --lib)"
         );
+        assert_eq!(
+            tool_display_label(
+                "sh_exec",
+                &json!({"bin":"bash","stdin":"find src -maxdepth 2 -type f\nwc -l src/lib.rs"})
+            ),
+            "Bash(find src -maxdepth 2 -type f …)"
+        );
+        assert_eq!(
+            tool_display_label(
+                "sh_exec",
+                &json!({"action":"wait","job_id":"sh_5eec44a5e0b04ea5bf9f46f74d694fa6"})
+            ),
+            "Wait(background job)"
+        );
+    }
+
+    #[test]
+    fn file_uri_compaction_requires_real_path_prefix() {
+        let cwd = std::env::current_dir().unwrap();
+        let sibling = format!("{}2/src/main.rs", cwd.display());
+        let label = tool_display_label("fs_read", &json!({"uri": format!("file://{sibling}")}));
+        let expected_tail = format!(
+            "{}2/src/main.rs",
+            cwd.file_name().unwrap().to_string_lossy()
+        );
+
+        assert!(!label.contains("Read(2/src/main.rs)"), "{label}");
+        assert!(label.contains(&expected_tail), "{label}");
     }
 
     #[test]
@@ -316,6 +470,20 @@ mod tests {
                 &json!({"state":"running","stdout_bytes":12,"stderr_bytes":3})
             ),
             Some("running · out 12B · err 3B".into())
+        );
+        assert_eq!(
+            super::tool_result_extra_line(
+                "sh_exec",
+                &json!({
+                    "state":"exited",
+                    "exit":0,
+                    "stdout_bytes":20,
+                    "stderr_bytes":0,
+                    "command":"bash",
+                    "stdout_tail":"found 12 files\nok\n"
+                })
+            ),
+            Some("bash · exit 0 · out 20B · err 0B · out: found 12 files / ok".into())
         );
     }
 

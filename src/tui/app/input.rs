@@ -226,14 +226,32 @@ impl TuiApp {
                     self.job_detail_scroll = 0;
                     UserAction::None
                 }
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('k') => {
                     self.selected_job = self.selected_job.saturating_sub(1);
                     UserAction::None
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     if !self.sh_jobs.is_empty() {
                         self.selected_job = (self.selected_job + 1).min(self.sh_jobs.len() - 1);
                     }
+                    UserAction::None
+                }
+                KeyCode::PageUp => {
+                    self.selected_job = self.selected_job.saturating_sub(8);
+                    UserAction::None
+                }
+                KeyCode::PageDown => {
+                    if !self.sh_jobs.is_empty() {
+                        self.selected_job = (self.selected_job + 8).min(self.sh_jobs.len() - 1);
+                    }
+                    UserAction::None
+                }
+                KeyCode::Home => {
+                    self.selected_job = 0;
+                    UserAction::None
+                }
+                KeyCode::End => {
+                    self.selected_job = self.sh_jobs.len().saturating_sub(1);
                     UserAction::None
                 }
                 _ => UserAction::None,
@@ -247,11 +265,11 @@ impl TuiApp {
                     self.panel = TuiPanel::Jobs;
                     UserAction::None
                 }
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('k') => {
                     self.job_detail_scroll = self.job_detail_scroll.saturating_sub(1);
                     UserAction::None
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     self.job_detail_scroll = self.job_detail_scroll.saturating_add(1);
                     UserAction::None
                 }
@@ -261,6 +279,10 @@ impl TuiApp {
                 }
                 KeyCode::PageDown => {
                     self.job_detail_scroll = self.job_detail_scroll.saturating_add(8);
+                    UserAction::None
+                }
+                KeyCode::Home => {
+                    self.job_detail_scroll = 0;
                     UserAction::None
                 }
                 _ => UserAction::None,

@@ -5,6 +5,7 @@
 //! impl is selected by the host.
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 use crate::core::cancel::CancelToken;
 use crate::core::error::ModelError;
@@ -81,6 +82,19 @@ pub enum NetErr {
 #[async_trait]
 pub trait NetEgress: Send + Sync {
     async fn http(&self, req: HttpReq, cancel: CancelToken) -> Result<HttpResp, NetErr>;
+
+    async fn http_with_body_chunks(
+        &self,
+        req: HttpReq,
+        cancel: CancelToken,
+        chunks: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    ) -> Result<HttpResp, NetErr> {
+        let resp = self.http(req, cancel).await?;
+        if let Some(tx) = chunks {
+            let _ = tx.send(resp.body.clone());
+        }
+        Ok(resp)
+    }
 }
 
 // =================== Shared helpers for ModelAdapter impls ===================

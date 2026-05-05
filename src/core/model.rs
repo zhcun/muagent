@@ -1,6 +1,7 @@
 //! ModelAdapter trait + request/reply types。
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 use crate::core::cache::CachePolicy;
 use crate::core::cancel::CancelToken;
@@ -99,9 +100,25 @@ pub struct ModelReply {
     pub thinking: Vec<ThinkingArtifact>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelStreamEvent {
+    TextDelta(String),
+    Reset,
+}
+
 #[async_trait]
 pub trait ModelAdapter: Send + Sync {
     fn caps(&self) -> LlmCaps;
 
     async fn turn(&self, req: ModelRequest, cancel: CancelToken) -> Result<ModelReply, ModelError>;
+
+    async fn turn_stream(
+        &self,
+        req: ModelRequest,
+        cancel: CancelToken,
+        stream: Option<mpsc::UnboundedSender<ModelStreamEvent>>,
+    ) -> Result<ModelReply, ModelError> {
+        let _ = stream;
+        self.turn(req, cancel).await
+    }
 }

@@ -3,7 +3,7 @@
 //! sub-renderers it calls. Lives in its own `impl TuiApp` block — pure
 //! presentation, no input handling, no state mutation.
 
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap};
@@ -16,7 +16,7 @@ use super::super::style::{
     dim_dot_separator, format_bytes, format_chars, format_elapsed, format_turn_meta,
     job_state_label, job_state_style, one_line, plural, push_code_block_line, push_code_fence_rule,
     push_wrapped_message_line, role_body_style, role_style, selected_window_start,
-    spinner_frame_at, text_lines,
+    spinner_frame_at, text_lines, wrap_by_display_width,
 };
 use super::super::ChatRole;
 use super::types::TuiPanel;
@@ -43,6 +43,7 @@ fn context_bar_spans(used: u32, max: u32) -> Vec<Span<'static>> {
     let used_label = compact_token_label(used);
     let max_label = compact_token_label(max);
     vec![
+        Span::styled("ctx ", Style::default().fg(Color::DarkGray)),
         Span::styled("[", Style::default().fg(Color::DarkGray)),
         Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
         Span::styled(
@@ -185,27 +186,7 @@ impl TuiApp {
         // Mouse capture is intentionally left off so terminal selection/copy
         // stays native.
         let help = self.footer_help_text();
-        let mut spans = self.footer_context_spans();
-        if self.running_sh_job_count() > 0 {
-            if !spans.is_empty() {
-                spans.push(dim_dot_separator());
-            }
-            spans.push(Span::styled(
-                self.sh_job_status_text(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        if self.queue_len > 0 {
-            if !spans.is_empty() {
-                spans.push(dim_dot_separator());
-            }
-            spans.extend(self.queue_footer_spans());
-        }
-        if !spans.is_empty() {
-            spans.push(dim_dot_separator());
-        }
+        let mut footer_left = Vec::new();
         let help_style = if submit_blocked_by_queue {
             Style::default()
                 .fg(Color::DarkGray)
@@ -213,9 +194,21 @@ impl TuiApp {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        spans.push(Span::styled(help.to_string(), help_style));
-        let footer = Paragraph::new(Line::from(spans));
-        frame.render_widget(footer, chunks[4]);
+        footer_left.push(Span::styled(help.to_string(), help_style));
+        if self.running_sh_job_count() > 0 {
+            footer_left.push(dim_dot_separator());
+            footer_left.push(Span::styled(
+                self.sh_job_status_text(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if self.queue_len > 0 {
+            footer_left.push(dim_dot_separator());
+            footer_left.extend(self.queue_footer_spans());
+        }
+        self.render_footer(frame, chunks[4], Line::from(footer_left));
 
         // Slash command popup: rendered last so it overlays the message
         // area and floats just above the input box, like a typeahead.
@@ -299,27 +292,29 @@ impl TuiApp {
 
         match self.panel {
             TuiPanel::Jobs if self.sh_jobs.is_empty() => "Esc back · Ctrl-B chat · Ctrl-C quit",
-            TuiPanel::Jobs => "↑↓ · Enter · Esc back · Ctrl-C quit",
-            TuiPanel::JobDetail => "↑↓ · PgUp/PgDn · Esc back · Ctrl-C quit",
+            TuiPanel::Jobs => "↑↓/jk · PgUp/PgDn · Enter detail · Esc back · Ctrl-C quit",
+            TuiPanel::JobDetail => "↑↓/jk · PgUp/PgDn · Home top · Esc back · Ctrl-C quit",
             TuiPanel::Chat if self.status == "cancelling" && self.scroll_back > 0 => {
-                "Enter locked · End bottom · Ctrl-C quit"
+                "Enter locked · End bottom · Ctrl-B jobs · Ctrl-C quit"
             }
             TuiPanel::Chat if self.status == "cancelling" => {
-                "Enter locked · draft kept · Ctrl-C quit"
+                "Enter locked · draft kept · Ctrl-B jobs · Ctrl-C quit"
             }
             TuiPanel::Chat if self.is_submit_locked() && self.scroll_back > 0 => {
-                "Enter locked · End bottom · Esc stop · Ctrl-C quit"
+                "Enter locked · End bottom · Ctrl-B jobs · Esc stop · Ctrl-C quit"
             }
-            TuiPanel::Chat if self.is_submit_locked() => "Enter locked · draft kept · Ctrl-C quit",
+            TuiPanel::Chat if self.is_submit_locked() => {
+                "Enter locked · draft kept · Ctrl-B jobs · Ctrl-C quit"
+            }
             TuiPanel::Chat
                 if matches!(self.status.as_str(), "running" | "cancelling")
                     && self.scroll_back > 0 =>
             {
-                "End bottom · Enter queue · Esc stop · Ctrl-C quit"
+                "End bottom · Enter queue · Ctrl-B jobs · Esc stop · Ctrl-C quit"
             }
             TuiPanel::Chat if self.scroll_back > 0 => "PgUp/PgDn · End bottom · Ctrl-C quit",
             TuiPanel::Chat if matches!(self.status.as_str(), "running" | "cancelling") => {
-                "Enter queue · Esc stop · Ctrl-C quit"
+                "Enter queue · Ctrl-B jobs · Esc stop · Ctrl-C quit"
             }
             TuiPanel::Chat if self.pastes.is_empty() => {
                 "Enter · ↑↓ history · Tab · Ctrl-B jobs · Ctrl-C quit"
@@ -333,6 +328,36 @@ impl TuiApp {
             Some(max) => context_bar_spans(self.last_prompt_tokens, max),
             None => Vec::new(),
         }
+    }
+
+    fn render_footer(&self, frame: &mut Frame<'_>, area: Rect, left: Line<'static>) {
+        let right = Line::from(self.footer_context_spans());
+        let right_width = line_width(&right);
+        if right_width == 0 || area.width < 48 {
+            frame.render_widget(Paragraph::new(left), area);
+            return;
+        }
+
+        let gap = 1u16;
+        let right_width = (right_width as u16).min(area.width.saturating_sub(gap));
+        let left_width = area.width.saturating_sub(right_width).saturating_sub(gap);
+        let left_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: left_width,
+            height: area.height,
+        };
+        let right_area = Rect {
+            x: area.x + area.width.saturating_sub(right_width),
+            y: area.y,
+            width: right_width,
+            height: area.height,
+        };
+        frame.render_widget(Paragraph::new(left), left_area);
+        frame.render_widget(
+            Paragraph::new(right).alignment(Alignment::Right),
+            right_area,
+        );
     }
 
     fn queue_footer_spans(&self) -> Vec<Span<'static>> {
@@ -563,56 +588,57 @@ impl TuiApp {
 
     fn activity_line(&self, entry: &str, width: usize) -> Line<'static> {
         let entry = entry.trim();
-        let (text, color, bold) =
-            if matches!(entry, "thinking" | "using tools" | "checking tool result") {
-                let label =
-                    activity_footer_label(entry).unwrap_or_else(|| title_case_status(entry));
-                let glyph = self
-                    .turn_started
-                    .map(|started| spinner_frame_at(started.elapsed()))
-                    .unwrap_or("⠋");
-                let meta = self
-                    .turn_started
-                    .map(|started| {
-                        format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
-                    })
-                    .unwrap_or_default();
-                (format!("{glyph} {label}{meta}"), Color::Yellow, true)
-            } else if let Some(label) = entry.strip_prefix("Running ") {
-                let glyph = self
-                    .turn_started
-                    .map(|started| spinner_frame_at(started.elapsed()))
-                    .unwrap_or("⠋");
-                let meta = self
-                    .turn_started
-                    .map(|started| {
-                        format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
-                    })
-                    .unwrap_or_default();
-                (format!("{glyph} {label}{meta}"), Color::Yellow, true)
-            } else if let Some(label) = entry.strip_prefix("Tool failed: ") {
-                (format!("failed · {label}"), Color::Red, true)
-            } else if entry.starts_with("error:") {
-                (entry.to_string(), Color::Red, true)
-            } else if entry == "stopped" || entry == "stopping current task" {
-                let glyph = self
-                    .turn_started
-                    .map(|started| spinner_frame_at(started.elapsed()))
-                    .unwrap_or("⠋");
-                let meta = self
-                    .turn_started
-                    .map(|started| {
-                        format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
-                    })
-                    .unwrap_or_default();
-                (format!("{glyph} Stopping{meta}"), Color::Red, true)
-            } else if entry.starts_with("paused:") {
-                (title_case_status(entry), Color::Yellow, true)
-            } else if let Some(label) = activity_footer_label(entry) {
-                (label, Color::DarkGray, false)
-            } else {
-                (entry.to_string(), Color::DarkGray, false)
-            };
+        let (text, color, bold) = if matches!(
+            entry,
+            "working" | "thinking" | "responding" | "using tools" | "checking tool result"
+        ) {
+            let label = activity_footer_label(entry).unwrap_or_else(|| title_case_status(entry));
+            let glyph = self
+                .turn_started
+                .map(|started| spinner_frame_at(started.elapsed()))
+                .unwrap_or("⠋");
+            let meta = self
+                .turn_started
+                .map(|started| {
+                    format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
+                })
+                .unwrap_or_default();
+            (format!("{glyph} {label}{meta}"), Color::Yellow, true)
+        } else if let Some(label) = entry.strip_prefix("Running ") {
+            let glyph = self
+                .turn_started
+                .map(|started| spinner_frame_at(started.elapsed()))
+                .unwrap_or("⠋");
+            let meta = self
+                .turn_started
+                .map(|started| {
+                    format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
+                })
+                .unwrap_or_default();
+            (format!("{glyph} {label}{meta}"), Color::Yellow, true)
+        } else if let Some(label) = entry.strip_prefix("Tool failed: ") {
+            (format!("failed · {label}"), Color::Red, true)
+        } else if entry.starts_with("error:") {
+            (entry.to_string(), Color::Red, true)
+        } else if entry == "stopped" || entry == "stopping current task" {
+            let glyph = self
+                .turn_started
+                .map(|started| spinner_frame_at(started.elapsed()))
+                .unwrap_or("⠋");
+            let meta = self
+                .turn_started
+                .map(|started| {
+                    format!(" {}", format_turn_meta(started.elapsed(), self.turn_tokens))
+                })
+                .unwrap_or_default();
+            (format!("{glyph} Stopping{meta}"), Color::Red, true)
+        } else if entry.starts_with("paused:") {
+            (title_case_status(entry), Color::Yellow, true)
+        } else if let Some(label) = activity_footer_label(entry) {
+            (label, Color::DarkGray, false)
+        } else {
+            (entry.to_string(), Color::DarkGray, false)
+        };
         let style = if bold {
             Style::default().fg(color).add_modifier(Modifier::BOLD)
         } else {
@@ -635,7 +661,7 @@ impl TuiApp {
         let mut lines = Vec::new();
         if self.sh_jobs.is_empty() {
             lines.push(Line::from(Span::styled(
-                "No background sh jobs yet.",
+                "No background jobs yet.",
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
@@ -654,18 +680,24 @@ impl TuiApp {
                     base
                 };
                 let marker = if selected { "▎ " } else { "  " };
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "{}{} · {} · out {} · err {} · {}",
-                        marker,
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(one_line(&job.command, 72), style),
+                    Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
                         job_state_label(&job.state, job.code),
-                        format_elapsed(job.elapsed_ms),
-                        format_bytes(job.stdout_bytes),
-                        format_bytes(job.stderr_bytes),
-                        one_line(&job.command, 96),
+                        job_state_style(&job.state),
                     ),
-                    style,
-                )));
+                    Span::styled(
+                        format!(
+                            " · {} · out {} · err {}",
+                            format_elapsed(job.elapsed_ms),
+                            format_bytes(job.stdout_bytes),
+                            format_bytes(job.stderr_bytes),
+                        ),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
             }
         }
 
@@ -678,13 +710,13 @@ impl TuiApp {
             .padding(Padding::horizontal(1))
             .title(Line::from(vec![
                 Span::styled(
-                    " sh jobs ",
+                    " background jobs ",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("· {} ", self.sh_job_status_text()),
+                    format!("· {} ", self.background_job_panel_status_text()),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
@@ -702,43 +734,50 @@ impl TuiApp {
 
         let mut lines = vec![
             Line::from(vec![
-                Span::styled(job.job_id.clone(), Style::default().fg(Color::Cyan)),
-                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                Span::styled("$ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    job.command.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
                 Span::styled(
                     job_state_label(&job.state, job.code),
                     job_state_style(&job.state),
                 ),
-                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format_elapsed(job.elapsed_ms),
+                    format!(
+                        " · {} · out {} · err {} · {}",
+                        format_elapsed(job.elapsed_ms),
+                        format_bytes(job.stdout_bytes),
+                        format_bytes(job.stderr_bytes),
+                        if job.output_truncated {
+                            "truncated"
+                        } else {
+                            "complete"
+                        }
+                    ),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]),
-            Line::raw(format!("$ {}", job.command)),
-            Line::raw(format!(
-                "out {} · err {} · {}",
-                format_bytes(job.stdout_bytes),
-                format_bytes(job.stderr_bytes),
-                if job.output_truncated {
-                    "truncated"
-                } else {
-                    "complete"
-                }
-            )),
         ];
         if let Some(error) = &job.error {
             lines.push(Line::raw(format!("error: {error}")));
         }
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            "--- stdout tail ---",
-            Style::default().fg(Color::Green),
+            "stdout tail",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.extend(text_lines(&job.stdout_tail));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            "--- stderr tail ---",
-            Style::default().fg(Color::Red),
+            "stderr tail",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
         lines.extend(text_lines(&job.stderr_tail));
 
@@ -748,7 +787,7 @@ impl TuiApp {
             .border_style(Style::default().fg(Color::DarkGray))
             .padding(Padding::horizontal(1))
             .title(Line::from(vec![Span::styled(
-                " sh job ",
+                " background job ",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -761,7 +800,23 @@ impl TuiApp {
     }
 
     pub(super) fn sh_job_status_text(&self) -> String {
-        format!("sh {}", self.running_sh_job_count())
+        self.background_job_status_text()
+    }
+
+    pub(super) fn background_job_status_text(&self) -> String {
+        let running = self.running_sh_job_count();
+        format!("{} {}", running, plural(running, "job", "jobs"))
+    }
+
+    pub(super) fn background_job_panel_status_text(&self) -> String {
+        let total = self.sh_jobs.len();
+        let running = self.running_sh_job_count();
+        format!(
+            "{} {} · {} running",
+            total,
+            plural(total, "job", "jobs"),
+            running
+        )
     }
 
     pub(super) fn running_sh_job_count(&self) -> usize {
@@ -808,8 +863,24 @@ impl TuiApp {
         let width = width.max(4) as usize;
         let mut lines = Vec::new();
         let mut prev_role: Option<&ChatRole> = None;
+        let mut last_progress_goal: Option<String> = None;
 
         for (i, message) in self.messages.iter().enumerate() {
+            if message.role == ChatRole::User {
+                last_progress_goal = None;
+            }
+
+            if matches!(message.role, ChatRole::Assistant) {
+                if let Some(progress) = ProgressBlock::parse(&message.text) {
+                    let show_goal = last_progress_goal.as_deref() != Some(progress.goal.as_str());
+                    push_progress_block_lines(&mut lines, &progress, show_goal, width);
+                    last_progress_goal = Some(progress.goal);
+                    lines.push(Line::raw(""));
+                    prev_role = Some(&message.role);
+                    continue;
+                }
+            }
+
             // A tool row that follows an Assistant or another Tool drops its
             // own ▎ bar and indents instead — visually nesting under the
             // preceding assistant turn so a flurry of tool calls reads as
@@ -916,6 +987,120 @@ fn push_running_tool_line(
     lines.push(Line::from(spans));
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ProgressBlock {
+    goal: String,
+    state: String,
+    next: String,
+}
+
+impl ProgressBlock {
+    fn parse(text: &str) -> Option<Self> {
+        let mut goal = None;
+        let mut state = None;
+        let mut next = None;
+        let mut seen = 0usize;
+
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let (key, value) = line.split_once(':')?;
+            let key = key.trim();
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            match key {
+                "GOAL" if goal.is_none() => goal = Some(value.to_string()),
+                "STATE" if state.is_none() => state = Some(value.to_string()),
+                "NEXT" if next.is_none() => next = Some(value.to_string()),
+                _ => return None,
+            }
+            seen += 1;
+        }
+
+        if seen == 3 {
+            Some(Self {
+                goal: goal?,
+                state: state?,
+                next: next?,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+fn push_progress_block_lines(
+    lines: &mut Vec<Line<'static>>,
+    progress: &ProgressBlock,
+    show_goal: bool,
+    width: usize,
+) {
+    if show_goal {
+        lines.push(Line::from(vec![
+            Span::styled("  ╭─ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Task",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        push_progress_field_line(lines, "Goal", &progress.goal, "  │ ", width);
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  ├─ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Update",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    push_progress_field_line(lines, "State", &progress.state, "  │ ", width);
+    push_progress_field_line(lines, "Next", &progress.next, "  ╰ ", width);
+}
+
+fn push_progress_field_line(
+    lines: &mut Vec<Line<'static>>,
+    name: &'static str,
+    value: &str,
+    prefix: &'static str,
+    width: usize,
+) {
+    let label = format!("{name:<5} ");
+    let prefix_width = UnicodeWidthStr::width(prefix) + UnicodeWidthStr::width(label.as_str());
+    let content_width = width.saturating_sub(prefix_width).max(1);
+    for (idx, part) in wrap_by_display_width(value, content_width)
+        .into_iter()
+        .enumerate()
+    {
+        let lead = if idx == 0 { prefix } else { "  │ " };
+        let field = if idx == 0 {
+            label.clone()
+        } else {
+            "      ".to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(lead.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                field,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(part, Style::default().fg(Color::Gray)),
+        ]));
+    }
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
 fn activity_footer_label(entry: &str) -> Option<String> {
     let entry = entry.trim();
     if is_low_signal_activity(entry) {
@@ -924,7 +1109,9 @@ fn activity_footer_label(entry: &str) -> Option<String> {
     let label = match entry {
         other if other.starts_with("Queued ") => return None,
         "preparing" => "Preparing".into(),
+        "working" => "Working".into(),
         "thinking" => "Thinking".into(),
+        "responding" => "Responding".into(),
         "using tools" => "Using tools".into(),
         "checking tool result" => "Checking result".into(),
         "stopping current task" | "stopped" => "Stopping".into(),
@@ -937,6 +1124,7 @@ fn activity_footer_label(entry: &str) -> Option<String> {
             .map(|label| format!("Failed {label}"))
             .unwrap_or_else(|| other.to_string()),
         other if other.starts_with("Tool ") => return None,
+        other if other.starts_with("responding:") => "Responding".into(),
         other if other.starts_with("assistant:") => "Receiving reply".into(),
         other => title_case_status(other),
     };
