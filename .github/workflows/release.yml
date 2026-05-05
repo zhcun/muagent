@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -79,7 +79,7 @@ jobs:
           tar -czf "dist/${asset}.tar.gz" -C dist "${asset}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: muagent-${{ env.RELEASE_TAG }}-${{ matrix.target }}
           path: dist/muagent-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive }}
@@ -94,7 +94,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
