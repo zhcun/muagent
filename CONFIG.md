@@ -418,6 +418,10 @@ root = "."
 |---|---:|---|---|
 | `fs.root` | Current working directory | `MUAGENT_ROOT` | `--root <DIR>` |
 
+`fs.root` is the workspace/default cwd advertised to the agent and used by
+shell execution. File tools accept absolute `file://` paths; this setting is
+not a filesystem access boundary on desktop/server platforms.
+
 Disable shell execution:
 
 ```bash
@@ -581,7 +585,7 @@ workspace ancestors and the user config directory.
 | `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_ACCOUNT_ID`, `OPENAI_CODEX_MODEL`, `OPENAI_CODEX_BASE_URL` | Codex |
 | `MUAGENT_CODEX_ACCESS_TOKEN`, `MUAGENT_CODEX_ACCOUNT_ID`, `MUAGENT_CODEX_REFRESH_TOKEN` | Codex override |
 | `MUAGENT_STORE` | Session store |
-| `MUAGENT_ROOT` | File-tool root |
+| `MUAGENT_ROOT` | Workspace/default cwd for file and shell tools |
 | `MUAGENT_TOOLS`, `MUAGENT_DISABLE_TOOLS` | Tool allowlist and denylist |
 | `MUAGENT_SKILLS`, `MUAGENT_DISABLE_SKILLS`, `MUAGENT_SKILL_AUTOLOAD` | Skill settings |
 | `MUAGENT_CACHE`, `MUAGENT_THINKING` | Runtime settings |

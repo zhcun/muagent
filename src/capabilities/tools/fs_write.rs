@@ -53,7 +53,7 @@ impl FsWrite {
             schema_json: json!({
                 "type":"object",
                 "properties": {
-                    "uri": {"type":"string"},
+                    "uri": {"type":"string","description":"Absolute file:// URI, e.g. file:///abs/path."},
                     "content": {"type":"string"},
                     "append": {"type":"boolean","default":false},
                     "create_dirs": {"type":"boolean","default":false},
@@ -90,7 +90,7 @@ impl Tool for FsWrite {
         if uri.has_dotdot_escape() {
             return GuardOutcome::Deny {
                 reason: "path contains `..`".into(),
-                hint: Some("use absolute paths within a root".into()),
+                hint: Some("use absolute file:// paths without `..`".into()),
             };
         }
         GuardOutcome::Allow

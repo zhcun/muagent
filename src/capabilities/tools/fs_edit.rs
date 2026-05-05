@@ -81,7 +81,7 @@ impl FsEdit {
             schema_json: json!({
                 "type":"object",
                 "properties": {
-                    "uri": {"type":"string","description":"Complete URI, e.g. file:///abs/path"},
+                    "uri": {"type":"string","description":"Absolute file:// URI, e.g. file:///abs/path."},
                     "old_text": {"type":"string","description":"Shortcut for a single replacement. Exact text to replace."},
                     "new_text": {"type":"string","description":"Shortcut for a single replacement. Replacement text."},
                     "edits": {
@@ -144,7 +144,7 @@ impl Tool for FsEdit {
         if uri.has_dotdot_escape() {
             return GuardOutcome::Deny {
                 reason: "path contains `..`".into(),
-                hint: Some("use absolute paths within a root".into()),
+                hint: Some("use absolute file:// paths without `..`".into()),
             };
         }
         GuardOutcome::Allow
@@ -244,16 +244,14 @@ impl Tool for FsEdit {
         // overwrote vs the new slice we wrote in. Aggregated as
         // {lines_added, lines_removed} so any consumer (TUI / audit replay)
         // can render `Update(path) +N -M` without reparsing the diff.
-        let (lines_added, lines_removed) = replacements.iter().fold(
-            (0usize, 0usize),
-            |(add, rem), r| {
+        let (lines_added, lines_removed) =
+            replacements.iter().fold((0usize, 0usize), |(add, rem), r| {
                 let old_slice = &base[r.start..r.end];
                 (
                     add + count_lines_in_slice(&r.new_text),
                     rem + count_lines_in_slice(old_slice),
                 )
-            },
-        );
+            });
 
         Ok(ToolOk::text(summary).with_detail(json!({
             "uri": uri.as_str(),

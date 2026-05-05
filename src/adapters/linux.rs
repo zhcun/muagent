@@ -1,4 +1,4 @@
-//! Linux 实现:FileSystem(基于 `file://` 根)+ ProcessExec。
+//! Linux 实现:FileSystem(基于 absolute `file://` paths)+ ProcessExec。
 //!
 //! M1-P1 里 NetEgress Linux 实现先不做(需要 reqwest);M3 阶段加。
 
@@ -22,14 +22,16 @@ use super::proc_exec::{CmdSpec, ExecErr, ExecJobSnapshot, ExecJobState, ExitOut,
 
 #[derive(Clone)]
 pub struct LinuxFileSystem {
-    /// 每一项:(id, absolute_path, writable)
+    /// Host-visible workspace/default roots. These are advertised to the
+    /// model and used as default shell cwd, but do not constrain absolute
+    /// `file://` paths on desktop/server platforms.
     roots: Vec<(String, PathBuf, bool)>,
 }
 
 impl LinuxFileSystem {
-    /// 用一组绝对路径作为 root 构造。路径会被 canonicalize(resolve symlinks
-    ///     + 去 `..`),这样 `/var/folders/...` 和 `/private/var/folders/...`
-    ///     这种 macOS symlink 等价写法不会导致 "outside roots" 误判。
+    /// 用一组绝对路径作为 advertised workspace roots。路径会被
+    /// canonicalize(resolve symlinks + 去 `..`),这样 `/var/folders/...`
+    /// 和 `/private/var/folders/...` 这种 macOS symlink 等价写法展示一致。
     pub fn new(roots: Vec<PathBuf>) -> Self {
         let roots = roots
             .into_iter()
@@ -75,22 +77,10 @@ impl LinuxFileSystem {
             return Err(FsErr::EscapeOutsideRoot(uri.0.clone()));
         }
 
-        // Normalize the nearest existing ancestor, not just the direct parent.
-        // Otherwise `root/link_to_outside/missing/file` with create_dirs=true
-        // would pass a lexical `starts_with(root)` check, then create dirs
-        // through the symlink outside the sandbox.
-        let canon_path = canonicalize_existing_prefix(&path);
-
-        for (_, abs, _) in &self.roots {
-            if canon_path == *abs || canon_path.starts_with(abs) {
-                return Ok(canon_path);
-            }
-        }
-        Err(FsErr::EscapeOutsideRoot(uri.0.clone()))
-    }
-
-    fn is_root_path(&self, path: &Path) -> bool {
-        self.roots.iter().any(|(_, abs, _)| abs == path)
+        // Normalize the nearest existing ancestor so symlinks are resolved
+        // before reads/writes. No configured-root boundary is enforced here;
+        // OS permissions and host policy decide what can be accessed.
+        Ok(canonicalize_existing_prefix(&path))
     }
 }
 
@@ -142,11 +132,6 @@ impl FileSystem for LinuxFileSystem {
 
     async fn write(&self, uri: &Uri, bytes: &[u8], opts: WriteOpts) -> Result<(), FsErr> {
         let path = self.resolve(uri)?;
-        if self.is_root_path(&path) {
-            return Err(FsErr::PermissionDenied(
-                "refusing to write filesystem root".into(),
-            ));
-        }
         if opts.create_dirs {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(io_err)?;
@@ -187,11 +172,6 @@ impl FileSystem for LinuxFileSystem {
 
     async fn delete(&self, uri: &Uri) -> Result<(), FsErr> {
         let path = self.resolve(uri)?;
-        if self.is_root_path(&path) {
-            return Err(FsErr::PermissionDenied(
-                "refusing to delete filesystem root".into(),
-            ));
-        }
         let md = tokio::fs::metadata(&path).await.map_err(io_err)?;
         if md.is_dir() {
             tokio::fs::remove_dir(&path).await.map_err(io_err)
@@ -203,11 +183,6 @@ impl FileSystem for LinuxFileSystem {
     async fn rename(&self, from: &Uri, to: &Uri) -> Result<(), FsErr> {
         let p_from = self.resolve(from)?;
         let p_to = self.resolve(to)?;
-        if self.is_root_path(&p_from) || self.is_root_path(&p_to) {
-            return Err(FsErr::PermissionDenied(
-                "refusing to rename filesystem root".into(),
-            ));
-        }
         tokio::fs::rename(&p_from, &p_to).await.map_err(io_err)
     }
 }

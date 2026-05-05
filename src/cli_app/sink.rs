@@ -33,7 +33,9 @@ pub enum SessionResetKind {
     New,
     Continued,
     /// Forked from a specific run; the intro line is sink-rendered for TUI.
-    Forked { intro: String },
+    Forked {
+        intro: String,
+    },
 }
 
 /// Front-end-agnostic write surface for command handlers.

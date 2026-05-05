@@ -30,7 +30,7 @@ pub(crate) fn map_fs_err(e: crate::adapters::FsErr) -> ToolErr {
         PermissionDenied(s) => ToolErr {
             msg: format!("permission denied: {s}"),
             retryable: false,
-            hint: Some("root may be read-only; try a different root".into()),
+            hint: Some("check OS permissions or choose a writable path".into()),
         },
         DirectoryNotEmpty(s) => ToolErr {
             msg: format!("directory not empty: {s}"),
@@ -45,9 +45,9 @@ pub(crate) fn map_fs_err(e: crate::adapters::FsErr) -> ToolErr {
             hint: Some("only file:// is supported".into()),
         },
         EscapeOutsideRoot(s) => ToolErr {
-            msg: format!("outside all roots: {s}"),
+            msg: format!("invalid file path: {s}"),
             retryable: false,
-            hint: Some("paths must be within allowed roots".into()),
+            hint: Some("use an absolute file:// path without `..` segments".into()),
         },
         StaleBookmark(s) => ToolErr {
             msg: format!("stale bookmark: {s}"),

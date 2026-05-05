@@ -106,7 +106,7 @@ impl FsRead {
             schema_json: json!({
                 "type":"object",
                 "properties": {
-                    "uri": {"type":"string","description":"Complete URI, e.g. file:///abs/path"},
+                    "uri": {"type":"string","description":"Absolute file:// URI, e.g. file:///abs/path."},
                     "offset": {"type":"integer","minimum":0,"default":0,
                                "description":"Byte offset to start reading from."},
                     "max_bytes": {"type":"integer","minimum":1,"default":51200,
@@ -148,7 +148,7 @@ impl Tool for FsRead {
         if uri.has_dotdot_escape() {
             return GuardOutcome::Deny {
                 reason: "path contains `..`".into(),
-                hint: Some("use absolute paths within a root".into()),
+                hint: Some("use absolute file:// paths without `..`".into()),
             };
         }
         GuardOutcome::Allow

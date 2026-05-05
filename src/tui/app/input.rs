@@ -5,8 +5,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 
 use super::super::style::{common_prefix, new_input, paste_line_count, trim_newlines};
-use super::TuiApp;
 use super::types::{InputDraft, PasteBlock, TuiPanel, UserAction, UserSubmission};
+use super::TuiApp;
 
 const MAX_INPUT_HISTORY: usize = 100;
 const MAX_HISTORY_ENTRY_CHARS: usize = 8000;

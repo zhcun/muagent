@@ -253,11 +253,12 @@ async fn m1_fs_edit_dry_run_validates_without_writing() {
     let _ = std::fs::remove_dir(&tmp);
 }
 
-// -------- Test 2:fs.write 对越权路径 → ToolResult(err) --------
+// -------- Test 2:fs.write accepts absolute paths outside configured workspace --------
 
 #[tokio::test]
-async fn m1_fs_write_escape_root_denied() {
+async fn m1_fs_write_allows_absolute_path_outside_config_root() {
     let tmp = tempdir();
+    let outside = tempdir();
     let fs = Arc::new(LinuxFileSystem::new(vec![tmp.clone()]));
     let bundle = Arc::new(AdapterBundle::builder().fs(fs).build().unwrap());
 
@@ -265,24 +266,27 @@ async fn m1_fs_write_escape_root_denied() {
     muagent::capabilities::tools::register_defaults(&registry, bundle);
     let executor = DefaultToolExecutor::new(registry);
 
-    // Write outside root
+    // `tmp` is only the advertised workspace/default cwd. Absolute file://
+    // paths elsewhere are allowed; OS permissions decide access.
+    let outside_file = outside.join("allowed.txt");
     let c = call(
         "x",
         "fs_write",
         json!({
-            "uri": "file:///etc/passwd",
-            "content": "hack",
+            "uri": format!("file://{}", outside_file.display()),
+            "content": "allowed",
         }),
     );
     let r = executor
         .execute(&c, &ToolContext::ephemeral(), CancelToken::never())
         .await
         .unwrap();
-    assert!(!r.ok);
-    assert!(!r.retryable); // 越权硬错,不重试
-    assert!(r.text().contains("outside all roots"));
+    assert!(r.ok, "{:?}", r);
+    assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "allowed");
 
     let _ = std::fs::remove_dir(&tmp);
+    let _ = std::fs::remove_file(&outside_file);
+    let _ = std::fs::remove_dir(&outside);
 }
 
 // -------- Test 3:sh.exec echo --------

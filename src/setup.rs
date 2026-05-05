@@ -29,7 +29,7 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
     let model_net = Arc::new(ReqwestEgress::new().map_err(|e| format!("net init: {e:?}"))?);
     let model = build_model_adapter(&cfg.model, model_net.clone())?;
 
-    // Adapter bundle: fs root + shell process execution.
+    // Adapter bundle: filesystem workspace/default cwd + shell process execution.
     let fs = Arc::new(LinuxFileSystem::new(vec![cfg.fs.root.clone()]));
     let proc = Arc::new(LinuxProcessExec::new());
     let bundle = Arc::new(
@@ -194,6 +194,7 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
         .tools(executor)
         .store(store)
         .tools_provider(provider)
+        .hook_model(cfg.model.model.clone())
         .base_system_prompt(base_system)
         .compactor(compactor)
         .cache_policy(cache_policy)
@@ -239,10 +240,18 @@ fn system_prompt(cfg: &Config) -> String {
         std::env::consts::OS,
         std::env::consts::ARCH
     ));
-    s.push_str(&format!("- Filesystem root: {}\n", cfg.fs.root.display()));
+    s.push_str(&format!(
+        "- Workspace directory: {}\n",
+        cfg.fs.root.display()
+    ));
+    s.push_str(
+        "- Filesystem tools: use absolute file:// paths. The workspace directory \
+         is default context, not an access boundary; host OS permissions and \
+         tool guards still apply.\n",
+    );
     s.push_str(
         "- Shell execution: enabled. sh_exec can run binaries available on PATH \
-         from the filesystem root.\n",
+         from the workspace directory.\n",
     );
     if !cfg.mcp.sse_endpoints.is_empty() {
         s.push_str(&format!(

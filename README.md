@@ -2,12 +2,16 @@
 
 A minimal harness for a complete local agent.
 
-`muagent` keeps the interface small while shipping the full agent loop: model
-adapters, filesystem/shell tools, resumable sessions, long-context
-compaction, skill and MCP loading, image inputs, and terminal-first workflows
-through one-shot `exec` and a full-screen TUI.
+Supported:
 
-It works with OpenRouter, OpenAI, Codex OAuth, Anthropic, and Google.
+- Providers: OpenRouter, OpenAI, Codex OAuth, Anthropic, Google
+- Modes: one-shot `exec`, line REPL, full-screen TUI
+- Tools: filesystem, shell, built-in registry, custom tools
+- Extensions: MCP, skills, core lifecycle hooks
+- Sessions: resume, continue, fork, search, JSONL or memory store
+- Context: long-session compaction, summary recall, prompt cache keys
+- Model features: native tool use, reasoning/thinking, image inputs
+- Operations: tool audit records, cancellation, retries, capability boundaries
 
 ## Install
 
@@ -128,6 +132,7 @@ muagent --provider openai resume --last
   usage
 - [CONFIG.md](CONFIG.md): provider defaults, config files, model capabilities,
   and OAuth
+- [HOOKS.md](HOOKS.md): core lifecycle hook API for host integrations
 - [DEVELOPMENT.md](DEVELOPMENT.md): local commands, tests, benchmarks, and
   source layout
 - [BUILD.md](BUILD.md): cross-platform build and deployment notes

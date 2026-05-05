@@ -2,7 +2,8 @@
 
 This document covers local development, tests, benchmarks, and the source tree.
 User-facing CLI usage is in [USAGE.md](USAGE.md), configuration is in
-[CONFIG.md](CONFIG.md), and cross-platform builds are in [BUILD.md](BUILD.md).
+[CONFIG.md](CONFIG.md), host lifecycle hooks are in [HOOKS.md](HOOKS.md), and
+cross-platform builds are in [BUILD.md](BUILD.md).
 
 ## Install Rust
 
@@ -112,7 +113,7 @@ muagent/
 ├── package.json
 ├── src/
 │   ├── bin/              # CLI and MCP test server
-│   ├── core/             # Runner, FSM, traits, protocol
+│   ├── core/             # Runner, FSM, traits, hook protocol
 │   ├── runtime/          # default executor and tool-set provider
 │   ├── providers/        # OpenAI, Anthropic, Google, Codex adapters
 │   ├── capabilities/     # built-in tools, skills, MCP

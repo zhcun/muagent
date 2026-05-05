@@ -60,11 +60,16 @@ fn cli_default_system_from_source() -> String {
         std::env::consts::ARCH
     ));
     system.push_str(&format!(
-        "- Filesystem root: {}\n",
+        "- Workspace directory: {}\n",
         std::env::current_dir()
             .unwrap_or_else(|_| ".".into())
             .display()
     ));
+    system.push_str(
+        "- Filesystem tools: use absolute file:// paths. The workspace directory \
+         is default context, not an access boundary; host OS permissions and \
+         tool guards still apply.\n",
+    );
     system.push_str("- Shell execution: disabled.\n");
     system
 }

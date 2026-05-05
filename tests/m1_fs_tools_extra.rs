@@ -126,13 +126,13 @@ async fn fs_delete_rejects_non_empty_directory() {
 }
 
 #[tokio::test]
-async fn fs_delete_rejects_root_directory() {
+async fn fs_delete_can_remove_workspace_directory_when_empty() {
     let root = tmp();
     let (reg, _) = wire(root.clone());
 
     let r = call(reg.clone(), "fs_delete", json!({"uri": uri_of(&root)})).await;
-    assert!(!r.ok, "{:?}", r);
-    assert!(root.exists());
+    assert!(r.ok, "{:?}", r);
+    assert!(!root.exists());
 }
 
 #[tokio::test]
@@ -158,8 +158,12 @@ async fn fs_rename_moves_file() {
 }
 
 #[tokio::test]
-async fn fs_rename_rejects_root_directory() {
+async fn fs_rename_can_move_workspace_directory() {
     let root = tmp();
+    let moved = root.with_file_name(format!(
+        "{}-moved",
+        root.file_name().unwrap().to_string_lossy()
+    ));
     let (reg, _) = wire(root.clone());
 
     let r = call(
@@ -167,17 +171,19 @@ async fn fs_rename_rejects_root_directory() {
         "fs_rename",
         json!({
             "from": uri_of(&root),
-            "to":   uri_of(&root.join("moved")),
+            "to":   uri_of(&moved),
         }),
     )
     .await;
-    assert!(!r.ok, "{:?}", r);
-    assert!(root.exists());
+    assert!(r.ok, "{:?}", r);
+    assert!(!root.exists());
+    assert!(moved.exists());
+    let _ = std::fs::remove_dir(&moved);
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn fs_write_create_dirs_rejects_symlink_escape() {
+async fn fs_write_create_dirs_follows_absolute_symlink_target() {
     use std::os::unix::fs::symlink;
 
     let root = tmp();
@@ -196,11 +202,12 @@ async fn fs_write_create_dirs_rejects_symlink_escape() {
         }),
     )
     .await;
-    assert!(!r.ok, "{:?}", r);
+    assert!(r.ok, "{:?}", r);
     assert!(
-        !outside_target.exists(),
-        "fs_write must not create files outside the root through a symlink"
+        outside_target.exists(),
+        "absolute file paths are not constrained by the configured workspace root"
     );
+    assert_eq!(std::fs::read_to_string(outside_target).unwrap(), "escaped");
 }
 
 #[tokio::test]

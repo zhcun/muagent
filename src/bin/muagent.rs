@@ -81,8 +81,17 @@ async fn run(invocation: cli::Invocation) -> Result<(), String> {
         cli::RunMode::ResumeLast { prompt, tui } => {
             let mut state = resume_last_state(&wired, &cfg, &clock).await?;
             ensure_workspace_root(&mut state, &cfg);
-            dispatch_resumed(wired, cfg, invocation.config, state, &clock, prompt, tui, &images)
-                .await
+            dispatch_resumed(
+                wired,
+                cfg,
+                invocation.config,
+                state,
+                &clock,
+                prompt,
+                tui,
+                &images,
+            )
+            .await
         }
         cli::RunMode::ResumeSession {
             session_id,
@@ -93,8 +102,17 @@ async fn run(invocation: cli::Invocation) -> Result<(), String> {
                 Uuid::parse_str(&session_id).map_err(|e| format!("invalid session_id: {e}"))?;
             let mut state = resume_session_state(&wired, sid, &clock).await?;
             ensure_workspace_root(&mut state, &cfg);
-            dispatch_resumed(wired, cfg, invocation.config, state, &clock, prompt, tui, &images)
-                .await
+            dispatch_resumed(
+                wired,
+                cfg,
+                invocation.config,
+                state,
+                &clock,
+                prompt,
+                tui,
+                &images,
+            )
+            .await
         }
         cli::RunMode::ListSessions { all } => {
             if !images.is_empty() {

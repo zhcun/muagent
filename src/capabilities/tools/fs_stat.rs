@@ -32,7 +32,7 @@ impl FsStat {
                 .into(),
             schema_json: json!({
                 "type": "object",
-                "properties": { "uri": {"type":"string"} },
+                "properties": { "uri": {"type":"string","description":"Absolute file:// URI, e.g. file:///abs/path."} },
                 "required": ["uri"],
             }),
             timeout: Duration::from_secs(2),
@@ -64,7 +64,7 @@ impl Tool for FsStat {
         if Uri::new(&a.uri).has_dotdot_escape() {
             return GuardOutcome::Deny {
                 reason: "path contains `..`".into(),
-                hint: None,
+                hint: Some("use absolute file:// paths without `..`".into()),
             };
         }
         GuardOutcome::Allow

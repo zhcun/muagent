@@ -47,7 +47,7 @@ impl FsList {
             schema_json: json!({
                 "type": "object",
                 "properties": {
-                    "uri": {"type":"string", "description":"Directory URI."},
+                    "uri": {"type":"string", "description":"Absolute file:// directory URI, e.g. file:///abs/path."},
                     "max_entries": {"type":"integer", "minimum":1, "default":500},
                 },
                 "required": ["uri"],
@@ -81,7 +81,7 @@ impl Tool for FsList {
         if Uri::new(&a.uri).has_dotdot_escape() {
             return GuardOutcome::Deny {
                 reason: "path contains `..`".into(),
-                hint: Some("use absolute paths within a root".into()),
+                hint: Some("use absolute file:// paths without `..`".into()),
             };
         }
         GuardOutcome::Allow

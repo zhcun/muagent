@@ -24,6 +24,9 @@ pub enum RuntimeError {
 
     #[error("invalid resume")]
     InvalidResume,
+
+    #[error("blocked by hook: {0}")]
+    HookBlocked(String),
 }
 
 impl RuntimeError {
@@ -35,6 +38,7 @@ impl RuntimeError {
             Store(e) => ErrorClass::Store(e.classify()),
             Cancelled => ErrorClass::Cancelled,
             InvariantViolation(_) | SubmitDuringRun | InvalidResume => ErrorClass::Bug,
+            HookBlocked(_) => ErrorClass::PolicyDenied,
         }
     }
 }
@@ -46,6 +50,7 @@ pub enum ErrorClass {
     ProviderFatal,
     ContextTooLong,
     Store(StoreErrClass),
+    PolicyDenied,
     Bug,
     Cancelled,
 }

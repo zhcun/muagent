@@ -4,11 +4,11 @@
 //! the credential files created by the official Codex CLI and pi-mono so this
 //! project can reuse an existing browser login instead of asking for an API key.
 
+use crate::core::clock::{Clock, SystemClock};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::core::clock::{Clock, SystemClock};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -312,9 +312,7 @@ async fn refresh_openai_codex_token(
     cancel: CancelToken,
 ) -> Result<OpenAiCodexToken, ModelError> {
     let refresh_token = token.refresh_token.as_deref().ok_or_else(|| {
-        ModelError::Auth(
-            "Codex OAuth token is expired and no refresh token is available".into(),
-        )
+        ModelError::Auth("Codex OAuth token is expired and no refresh token is available".into())
     })?;
     let body = form_urlencoded(&[
         ("grant_type", "refresh_token"),
@@ -358,9 +356,7 @@ async fn refresh_openai_codex_token(
     let access_token = parsed
         .access_token
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| {
-            ModelError::Parse("Codex OAuth refresh missing access_token".into())
-        })?;
+        .ok_or_else(|| ModelError::Parse("Codex OAuth refresh missing access_token".into()))?;
     let refresh_token = parsed
         .refresh_token
         .filter(|s| !s.trim().is_empty())

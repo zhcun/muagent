@@ -58,6 +58,45 @@ impl ToolExecutor for MockTools {
     }
 }
 
+struct RecordingHooks {
+    seen: Mutex<Vec<HookInput>>,
+    outputs: Mutex<Vec<(HookEventName, HookOutput)>>,
+}
+
+impl RecordingHooks {
+    fn new(outputs: Vec<(HookEventName, HookOutput)>) -> Self {
+        Self {
+            seen: Mutex::new(Vec::new()),
+            outputs: Mutex::new(outputs),
+        }
+    }
+
+    fn seen_events(&self) -> Vec<HookEventName> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|input| input.hook_event_name)
+            .collect()
+    }
+}
+
+#[async_trait]
+impl HookDispatcher for RecordingHooks {
+    async fn dispatch(&self, input: HookInput, _cancel: CancelToken) -> HookOutput {
+        let event = input.hook_event_name;
+        self.seen.lock().unwrap().push(input);
+        let mut outputs = self.outputs.lock().unwrap();
+        match outputs
+            .iter()
+            .position(|(candidate, _)| *candidate == event)
+        {
+            Some(idx) => outputs.remove(idx).1,
+            None => HookOutput::default(),
+        }
+    }
+}
+
 // ================ Helpers ================
 
 fn pc(id: &str, name: &str) -> PendingCall {
@@ -93,6 +132,23 @@ fn build_runner_with_retry(
         .store(store)
         .tools_provider(|_state: &RunState| ActiveToolSet::default())
         .retry_policy(retry)
+        .build()
+        .expect("runner build")
+}
+
+fn build_runner_with_hooks(
+    model: Arc<dyn ModelAdapter>,
+    tools: Arc<dyn ToolExecutor>,
+    store: Arc<dyn SessionStore>,
+    hooks: Arc<dyn HookDispatcher>,
+) -> Runner {
+    Runner::builder()
+        .model(model)
+        .tools(tools)
+        .store(store)
+        .tools_provider(|_state: &RunState| ActiveToolSet::default())
+        .hooks(hooks)
+        .hook_model("test-model")
         .build()
         .expect("runner build")
 }
@@ -639,6 +695,214 @@ async fn protocol_error_call_is_core_internal_not_executor_dependent() {
     assert!(protocol_result.model_text().contains("bad JSON"));
     assert!(!protocol_result.model_text().contains("no mock"));
     assert!(matches!(state.step, Step::Done { .. }));
+}
+
+#[tokio::test]
+async fn hooks_can_add_session_and_prompt_context() {
+    let store = Arc::new(MemorySessionStore::new());
+    let hooks = Arc::new(RecordingHooks::new(vec![
+        (
+            HookEventName::SessionStart,
+            HookOutput {
+                hook_specific_output: Some(HookSpecificOutput::SessionStart {
+                    additional_context: Some("session ctx".into()),
+                }),
+                ..Default::default()
+            },
+        ),
+        (
+            HookEventName::UserPromptSubmit,
+            HookOutput {
+                hook_specific_output: Some(HookSpecificOutput::UserPromptSubmit {
+                    additional_context: Some("prompt ctx".into()),
+                }),
+                ..Default::default()
+            },
+        ),
+    ]));
+    let model = Arc::new(CannedModel::new(vec![reply::text("done")]));
+    let runner = build_runner_with_hooks(
+        model,
+        Arc::new(MockTools::new()),
+        store.clone(),
+        hooks.clone(),
+    );
+
+    let mut state = new_state();
+    runner
+        .submit_user_message(
+            &mut state,
+            Message::User {
+                content: Content::text("hello"),
+            },
+        )
+        .await
+        .unwrap();
+    drive_until_terminal(&runner, &mut state, 10).await;
+
+    assert!(matches!(state.step, Step::Done { .. }));
+    assert!(state.history.iter().any(|m| matches!(
+        m,
+        Message::Observation {
+            kind: ObsKind::Steering,
+            text
+        } if text == "session ctx"
+    )));
+    assert!(state.history.iter().any(|m| matches!(
+        m,
+        Message::Observation {
+            kind: ObsKind::Steering,
+            text
+        } if text == "prompt ctx"
+    )));
+    let events = store.query_events(state.run_id, 0).await.unwrap();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::SessionStart { .. })));
+    assert_eq!(
+        hooks.seen_events()[..2],
+        [HookEventName::SessionStart, HookEventName::UserPromptSubmit]
+    );
+}
+
+#[tokio::test]
+async fn pre_tool_use_hook_can_deny_execution() {
+    let hooks = Arc::new(RecordingHooks::new(vec![(
+        HookEventName::PreToolUse,
+        HookOutput {
+            hook_specific_output: Some(HookSpecificOutput::PreToolUse {
+                permission_decision: Some(HookPermissionDecision::Deny),
+                permission_decision_reason: Some("no shell".into()),
+            }),
+            ..Default::default()
+        },
+    )]));
+    let model = Arc::new(CannedModel::new(vec![
+        reply::with_calls("call", vec![pc("c1", "danger")]),
+        reply::text("done"),
+    ]));
+    let tools = Arc::new(MockTools::new().with_result("danger", ToolResult::ok("SHOULD_NOT_RUN")));
+    let runner = build_runner_with_hooks(
+        model,
+        tools,
+        Arc::new(MemorySessionStore::new()),
+        hooks.clone(),
+    );
+
+    let mut state = new_state();
+    runner
+        .submit_user_message(
+            &mut state,
+            Message::User {
+                content: Content::text("go"),
+            },
+        )
+        .await
+        .unwrap();
+    drive_until_terminal(&runner, &mut state, 20).await;
+
+    let tool_result = state
+        .history
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult { result, .. } => Some(result),
+            _ => None,
+        })
+        .expect("tool result");
+    assert!(!tool_result.ok);
+    assert!(tool_result.text().contains("no shell"));
+    assert!(!tool_result.text().contains("SHOULD_NOT_RUN"));
+    assert!(hooks.seen_events().contains(&HookEventName::PreToolUse));
+}
+
+#[tokio::test]
+async fn post_tool_use_hook_can_replace_result() {
+    let hooks = Arc::new(RecordingHooks::new(vec![(
+        HookEventName::PostToolUse,
+        HookOutput {
+            decision: Some(HookDecision::Block),
+            reason: Some("normalize output first".into()),
+            ..Default::default()
+        },
+    )]));
+    let model = Arc::new(CannedModel::new(vec![
+        reply::with_calls("call", vec![pc("c1", "raw")]),
+        reply::text("done"),
+    ]));
+    let tools = Arc::new(MockTools::new().with_result("raw", ToolResult::ok("raw output")));
+    let runner = build_runner_with_hooks(
+        model,
+        tools,
+        Arc::new(MemorySessionStore::new()),
+        hooks.clone(),
+    );
+
+    let mut state = new_state();
+    runner
+        .submit_user_message(
+            &mut state,
+            Message::User {
+                content: Content::text("go"),
+            },
+        )
+        .await
+        .unwrap();
+    drive_until_terminal(&runner, &mut state, 20).await;
+
+    let tool_result = state
+        .history
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult { result, .. } => Some(result),
+            _ => None,
+        })
+        .expect("tool result");
+    assert!(!tool_result.ok);
+    assert!(tool_result.text().contains("normalize output first"));
+    assert!(hooks.seen_events().contains(&HookEventName::PostToolUse));
+}
+
+#[tokio::test]
+async fn stop_hook_can_request_continuation() {
+    let hooks = Arc::new(RecordingHooks::new(vec![(
+        HookEventName::Stop,
+        HookOutput {
+            decision: Some(HookDecision::Block),
+            reason: Some("Need one more line.".into()),
+            ..Default::default()
+        },
+    )]));
+    let model = Arc::new(CannedModel::new(vec![
+        reply::text("draft"),
+        reply::text("final"),
+    ]));
+    let runner = build_runner_with_hooks(
+        model,
+        Arc::new(MockTools::new()),
+        Arc::new(MemorySessionStore::new()),
+        hooks,
+    );
+
+    let mut state = new_state();
+    runner
+        .submit_user_message(
+            &mut state,
+            Message::User {
+                content: Content::text("write"),
+            },
+        )
+        .await
+        .unwrap();
+    drive_until_terminal(&runner, &mut state, 20).await;
+
+    assert!(matches!(state.step, Step::Done { .. }));
+    assert_eq!(state.usage.turns, 2);
+    assert!(state.history.iter().any(|m| matches!(
+        m,
+        Message::User {
+            content: Content::Text(text)
+        } if text == "Need one more line."
+    )));
 }
 
 #[test]

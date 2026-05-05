@@ -3,7 +3,7 @@
 //! v3.1 极小内核:
 //! - 4 个必备 trait:`ModelAdapter` / `ToolExecutor` / `SessionStore` /
 //!   `ActiveToolSetProvider`
-//! - 1 个可选 helper:`Clock`
+//! - 可选 helpers:`Clock` / `HookDispatcher`
 //! - FSM:`Ready → ModelTurn → ToolBatch → ToolIntent → Done / Failed / Paused`
 //! - `RunState` 带 `schema_version`;step 级原子持久化;
 //!   事件 `(run_id, seq)` at-least-once
@@ -24,6 +24,7 @@ pub mod clock;
 pub mod compactor;
 pub mod error;
 pub mod event;
+pub mod hook;
 pub mod model;
 pub mod net;
 pub mod prompt;
@@ -56,6 +57,10 @@ pub mod prelude {
             ErrorClass, ModelError, RuntimeError, StoreErrClass, StoreError, ToolExecutorError,
         },
         event::{CallId, Event, EventSeq, RunId, SessionId, TurnId},
+        hook::{
+            HookDecision, HookDispatcher, HookEventName, HookInput, HookOutput,
+            HookPermissionDecision, HookSpecificOutput, NoopHookDispatcher, SessionStartSource,
+        },
         model::{LlmCaps, ModelAdapter, ModelReply, ModelRequest, TokenUsage},
         net::{
             check_model_status, net_err_to_model, HttpMethod, HttpReq, HttpResp, NetEgress, NetErr,

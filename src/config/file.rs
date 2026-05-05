@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::{expand_home, env_string, home_dir, split_list};
+use super::{env_string, expand_home, home_dir, split_list};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct FileConfig {

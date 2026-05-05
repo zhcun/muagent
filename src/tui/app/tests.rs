@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::adapters::ExecJobState;
 
-use super::super::style::{SPINNER_FRAMES, wrap_by_display_width};
+use super::super::style::{wrap_by_display_width, SPINNER_FRAMES};
 use super::types::{PasteBlock, TuiPanel};
 use super::*;
 
@@ -1029,8 +1029,8 @@ fn job(id: &str, state: ExecJobState, code: Option<i32>, command: &str) -> ShJob
 }
 
 fn render_text(app: &TuiApp, width: u16, height: u16) -> String {
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();

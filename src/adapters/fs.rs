@@ -1,11 +1,11 @@
 //! `FileSystem` adapter trait + URI / Root / errors。
 //!
 //! URI 语法:`<scheme>://[<root-id>]/<path>`。例:
-//! - `sandbox://notes/a.md`(app 沙盒内)
 //! - `file:///Users/mike/foo.txt`(Linux/Mac 绝对路径)
 //! - `bookmark://<UUID>/Downloads/x.pdf`(iOS 用户授权的根)
 //!
-//! 不允许 `..` 逃逸;所有 uri 必须落在 `roots()` 返回的某个 Root 下。
+//! Desktop/server `file://` adapters may allow arbitrary absolute paths.
+//! Mobile/bookmark-style adapters can still enforce their own root lists.
 
 use std::path::PathBuf;
 
@@ -148,6 +148,8 @@ pub trait FileSystem: Send + Sync {
 // ============ 工具函数 ============
 
 /// 给定 uri,找对应 Root(若存在)并返回相对路径。
+/// Root-scoped adapters can use this helper; absolute-path desktop adapters
+/// do not need to.
 pub fn resolve_within_roots<'a>(uri: &Uri, roots: &'a [Root]) -> Result<(&'a Root, String), FsErr> {
     if uri.has_dotdot_escape() {
         return Err(FsErr::EscapeOutsideRoot(uri.0.clone()));

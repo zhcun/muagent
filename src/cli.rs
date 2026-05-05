@@ -662,7 +662,7 @@ OPTIONS:
                           Use `memory` for throwaway sessions, or
                           `jsonl:/path/to/store` for a file-backed JSONL store.
                           A plain path is also treated as JSONL. (env: MUAGENT_STORE)
-      --root <DIR>        Sandbox root for fs tools (env: MUAGENT_ROOT).
+      --root <DIR>        Workspace/default cwd for file and shell tools (env: MUAGENT_ROOT).
       --mcp-sse <URLS>    Comma-separated legacy MCP SSE endpoint(s), e.g.
                           http://127.0.0.1:10086/sse. Repeated flags are
                           accepted. (env: MUAGENT_MCP_SSE)

@@ -1,4 +1,4 @@
-//! DefaultToolExecutor:tool filters → resolve → guard → sandbox + timeout + catch_unwind。
+//! DefaultToolExecutor:tool filters → resolve → guard → timeout + catch_unwind。
 //!
 //! 所有 tool(built-in / MCP / host 注册的)都**直接进 CapabilityRegistry**,
 //! 执行器只从 registry 解析。Skills 不再贡献 tools(Anthropic Skills 协议),
@@ -199,7 +199,7 @@ impl ToolExecutor for DefaultToolExecutor {
             }
         }
 
-        // 4) sandbox 执行:cancel(透传)+ timeout + catch_unwind
+        // 4) guarded execution:cancel(透传)+ timeout + catch_unwind
         let fut = tool.run(call.args.clone(), ctx, cancel);
         let run = tk_timeout(tool.descriptor().timeout, fut);
         let outcome = AssertUnwindSafe(run).catch_unwind().await;

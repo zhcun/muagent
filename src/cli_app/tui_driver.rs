@@ -19,14 +19,14 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-use crate::cli_app::commands::{CmdAction, handle};
+use crate::cli_app::commands::{handle, CmdAction};
 use crate::cli_app::doctor::{config_doctor_report, model_setup_hints};
-use crate::cli_app::driver::{TuiUpdate, submit_and_drive_with_updates};
+use crate::cli_app::driver::{submit_and_drive_with_updates, TuiUpdate};
 use crate::cli_app::tui_helpers::{
-    TuiAppSink, provider_label, seed_tui_history_messages, seed_tui_input_history,
-    sync_tui_runtime, thinking_label,
+    provider_label, seed_tui_history_messages, seed_tui_input_history, sync_tui_runtime,
+    thinking_label, TuiAppSink,
 };
-use crate::cli_app::{ReplRuntime, TUI_MAX_QUEUED_SUBMISSIONS, truncate};
+use crate::cli_app::{truncate, ReplRuntime, TUI_MAX_QUEUED_SUBMISSIONS};
 use crate::config::{Config, ConfigOverrides};
 use crate::core::clock::SystemClock;
 use crate::core::run_state::RunState;

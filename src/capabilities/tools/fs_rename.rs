@@ -1,4 +1,4 @@
-//! `fs_rename`:重命名/移动文件或目录。两端 URI 都必须落在 allowed roots 内。
+//! `fs_rename`:重命名/移动文件或目录。两端 URI 都必须是 absolute `file://` paths。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,14 +29,14 @@ impl FsRename {
     pub fn new(bundle: Arc<AdapterBundle>) -> Self {
         let desc = ToolDescriptor {
             name: "fs_rename".into(),
-            description: "Rename or move a file/directory. Both `from` and `to` must be within \
-                 allowed roots. Atomic on the same filesystem; may fail across mounts."
+            description: "Rename or move a file/directory. Both `from` and `to` must be absolute \
+                 file:// paths. Atomic on the same filesystem; may fail across mounts."
                 .into(),
             schema_json: json!({
                 "type": "object",
                 "properties": {
-                    "from": {"type":"string"},
-                    "to":   {"type":"string"},
+                    "from": {"type":"string","description":"Absolute source file:// URI, e.g. file:///abs/path."},
+                    "to":   {"type":"string","description":"Absolute destination file:// URI, e.g. file:///abs/path."},
                 },
                 "required": ["from","to"],
             }),
@@ -70,7 +70,7 @@ impl Tool for FsRename {
             if Uri::new(v).has_dotdot_escape() {
                 return GuardOutcome::Deny {
                     reason: format!("`{k}` contains `..`"),
-                    hint: None,
+                    hint: Some("use absolute file:// paths without `..`".into()),
                 };
             }
         }

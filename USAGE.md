@@ -276,7 +276,7 @@ muagent -- "- This prompt starts with a dash."
 | `--base-url <URL>` | Override the provider base URL |
 | `-i`, `--image <PATHS>` | Attach image files to a one-shot prompt |
 | `--store <SPEC>` | Use `memory`, `jsonl:/path/to/store`, or a plain JSONL store path |
-| `--root <DIR>` | Set the filesystem sandbox root for file tools |
+| `--root <DIR>` | Set the workspace/default cwd used for file and shell tools |
 | `--mcp-sse <URLS>` | Register comma-separated MCP SSE endpoints; repeated flags append |
 | `--cache <MODE>` | `auto` or `off` |
 | `--thinking <MODE>` | `high`, `auto`, `off`, `minimal`, `low`, `medium`, `max`, or `xhigh` |
@@ -379,7 +379,8 @@ Built-in tools:
 - `sh_exec`, registered by default and able to run binaries on `PATH` or by
   explicit path
 
-File tools are restricted to `fs.root` / `--root`. Disable shell execution with:
+File tools accept absolute `file://` paths; OS permissions decide access.
+Disable shell execution with:
 
 ```bash
 muagent --disable-tools sh_exec

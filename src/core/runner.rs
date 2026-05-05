@@ -10,6 +10,9 @@ use crate::core::clock::SystemClock;
 use crate::core::compactor::Compactor;
 use crate::core::error::{ErrorClass, ModelError, RuntimeError, StoreErrClass, StoreError};
 use crate::core::event::Event;
+use crate::core::hook::{
+    HookDispatcher, HookEventName, HookInput, HookOutput, NoopHookDispatcher, SessionStartSource,
+};
 use crate::core::model::{ModelAdapter, ModelReply, ModelRequest};
 use crate::core::prompt::{
     adapt_tool_descriptors, append_section, blocks_from_active_set, cache_fingerprint,
@@ -27,7 +30,7 @@ use crate::core::tool::{
     Idempotency, PendingCall, SideEffects, ToolContext, ToolExecutor, ToolResult,
     TOOL_PROTOCOL_ERROR_TOOL,
 };
-use crate::core::types::{Content, Message};
+use crate::core::types::{Content, ContentPart, Message, ObsKind};
 use futures::FutureExt;
 
 /// Pre-commit snapshot of every `RunState` field that `Runner::commit` may
@@ -109,6 +112,8 @@ pub struct Runner {
     retry_policy: RetryPolicy,
     cache_key_strategy: CacheKeyStrategy,
     summary_recall: bool,
+    hooks: Arc<dyn HookDispatcher>,
+    hook_model: String,
 }
 
 impl Runner {
@@ -140,6 +145,140 @@ impl Runner {
         self.cancel_lock().clone()
     }
 
+    async fn dispatch_hook(&self, input: HookInput) -> HookOutput {
+        let event = input.hook_event_name;
+        let cancel = self.cancel_lock().child();
+        let outcome = AssertUnwindSafe(self.hooks.dispatch(input, cancel))
+            .catch_unwind()
+            .await;
+        match outcome {
+            Ok(out) => {
+                if let Some(message) = out.system_message.as_deref() {
+                    tracing::warn!(
+                        target: "muagent::hook",
+                        kind = "hook_system_message",
+                        event = event.as_str(),
+                        message = %message,
+                        "hook returned system message"
+                    );
+                }
+                out
+            }
+            Err(panic) => {
+                tracing::error!(
+                    target: "muagent::hook",
+                    kind = "hook_dispatcher_panic",
+                    event = event.as_str(),
+                    panic = %panic_brief(panic),
+                    "hook dispatcher panicked; continuing"
+                );
+                HookOutput::default()
+            }
+        }
+    }
+
+    fn hook_input(&self, state: &RunState, event: HookEventName) -> HookInput {
+        HookInput {
+            session_id: state.session_id.to_string(),
+            run_id: Some(state.run_id.to_string()),
+            transcript_path: None,
+            cwd: state.workspace_root.clone().unwrap_or_else(|| ".".into()),
+            hook_event_name: event,
+            model: self.hook_model.clone(),
+            turn_id: Some(state.usage.turns.saturating_add(1).to_string()),
+            source: None,
+            prompt: None,
+            tool_name: None,
+            tool_use_id: None,
+            tool_input: None,
+            tool_response: None,
+            stop_hook_active: None,
+            last_assistant_message: None,
+        }
+    }
+
+    async fn session_start_hook(&self, state: &mut RunState) -> Result<(), RuntimeError> {
+        let source = if state.parent_run_id.is_some() || !state.history.is_empty() {
+            SessionStartSource::Resume
+        } else {
+            SessionStartSource::Startup
+        };
+        let mut input = self.hook_input(state, HookEventName::SessionStart);
+        input.turn_id = None;
+        input.source = Some(source);
+        let output = self.dispatch_hook(input).await;
+        if let Some(reason) = output.block_reason(HookEventName::SessionStart) {
+            return Err(RuntimeError::HookBlocked(reason));
+        }
+        let additional_context = output
+            .additional_context(HookEventName::SessionStart)
+            .map(str::to_string);
+        let run_id = state.run_id;
+        self.commit(state, move |s| {
+            if let Some(ctx) = additional_context {
+                s.push_observation(ObsKind::Steering, ctx);
+            }
+            let seq = s.next_seq();
+            vec![Event::SessionStart { run_id, seq }]
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn user_prompt_submit_hook(
+        &self,
+        state: &RunState,
+        prompt: String,
+    ) -> Result<HookOutput, RuntimeError> {
+        let mut input = self.hook_input(state, HookEventName::UserPromptSubmit);
+        input.prompt = Some(prompt);
+        let output = self.dispatch_hook(input).await;
+        if let Some(reason) = output.block_reason(HookEventName::UserPromptSubmit) {
+            return Err(RuntimeError::HookBlocked(reason));
+        }
+        Ok(output)
+    }
+
+    async fn pre_tool_use_hook(&self, state: &RunState, call: &PendingCall) -> Option<ToolResult> {
+        let mut input = self.hook_input(state, HookEventName::PreToolUse);
+        input.tool_name = Some(call.tool_name.clone());
+        input.tool_use_id = Some(call.id.clone());
+        input.tool_input = Some(call.args.clone());
+        let output = self.dispatch_hook(input).await;
+        output
+            .block_reason(HookEventName::PreToolUse)
+            .map(|reason| ToolResult::err(reason, false, Some("blocked by PreToolUse hook".into())))
+    }
+
+    async fn post_tool_use_hook(
+        &self,
+        state: &RunState,
+        call: &PendingCall,
+        mut result: ToolResult,
+    ) -> ToolResult {
+        let mut input = self.hook_input(state, HookEventName::PostToolUse);
+        input.tool_name = Some(call.tool_name.clone());
+        input.tool_use_id = Some(call.id.clone());
+        input.tool_input = Some(call.args.clone());
+        input.tool_response =
+            Some(serde_json::to_value(&result).unwrap_or(serde_json::Value::Null));
+        let output = self.dispatch_hook(input).await;
+        if let Some(reason) = output.block_reason(HookEventName::PostToolUse) {
+            return ToolResult::err(reason, false, Some("replaced by PostToolUse hook".into()));
+        }
+        if let Some(ctx) = output.additional_context(HookEventName::PostToolUse) {
+            append_tool_result_context(&mut result, ctx);
+        }
+        result
+    }
+
+    async fn stop_hook(&self, state: &RunState, last_assistant_message: &str) -> HookOutput {
+        let mut input = self.hook_input(state, HookEventName::Stop);
+        input.stop_hook_active = Some(false);
+        input.last_assistant_message = Some(last_assistant_message.to_string());
+        self.dispatch_hook(input).await
+    }
+
     /// 提交一条新用户消息。
     /// 仅在 `Ready` / `Done` / `Failed` 状态下合法;其它状态返 `SubmitDuringRun`。
     ///
@@ -154,11 +293,19 @@ impl Runner {
             Step::Ready | Step::Done { .. } | Step::Failed { .. } => {}
             _ => return Err(RuntimeError::SubmitDuringRun),
         }
+        if state.event_seq == 0 {
+            self.session_start_hook(state).await?;
+        }
         // Reset cancel token for the new conversational round (prior
         // round's Ctrl-C should not stick).
         *self.cancel_lock() = CancelToken::new();
         let now = self.clock.now_ms();
         let (content_chars, attachment_count) = message_content_stats(&msg);
+        let prompt = message_content_text(&msg);
+        let hook = self.user_prompt_submit_hook(state, prompt).await?;
+        let additional_context = hook
+            .additional_context(HookEventName::UserPromptSubmit)
+            .map(str::to_string);
         tracing::info!(
             target: "muagent::runner",
             kind = "user_message_submit",
@@ -174,6 +321,9 @@ impl Runner {
         );
         self.commit(state, |s| {
             s.push_message(msg);
+            if let Some(ctx) = additional_context {
+                s.push_observation(ObsKind::Steering, ctx);
+            }
             s.step = Step::Ready;
             s.updated_ms = now;
             let seq = s.next_seq();
@@ -664,10 +814,23 @@ impl Runner {
         state: &mut RunState,
         reply: ModelReply,
     ) -> Result<Vec<Event>, RuntimeError> {
+        let stop_hook = if reply.tool_calls.is_empty() {
+            Some(self.stop_hook(state, &reply.text).await)
+        } else {
+            None
+        };
         let usage = reply.usage;
         let text = reply.text;
         let thinking = reply.thinking;
         let tool_calls = reply.tool_calls;
+        let stop_additional_context = stop_hook.as_ref().and_then(|h| {
+            h.additional_context(HookEventName::Stop)
+                .map(str::to_string)
+        });
+        let stop_continuation = stop_hook
+            .as_ref()
+            .and_then(HookOutput::stop_continuation_reason);
+        let stop_continues = stop_continuation.is_some();
         let text_chars = text.chars().count();
         let thinking_count = thinking.len();
         let tool_call_count = tool_calls.len();
@@ -700,12 +863,22 @@ impl Runner {
                     seq: asst_seq,
                 }];
                 if tool_calls.is_empty() {
-                    s.step = Step::Done { final_text: text };
-                    let end_seq = s.next_seq();
-                    events.push(Event::SessionEnd {
-                        ok: true,
-                        seq: end_seq,
-                    });
+                    if let Some(ctx) = stop_additional_context {
+                        s.push_observation(ObsKind::Steering, ctx);
+                    }
+                    if let Some(continuation) = stop_continuation {
+                        s.push_user(continuation);
+                        s.step = Step::Ready;
+                        let user_seq = s.next_seq();
+                        events.push(Event::UserMessage { seq: user_seq });
+                    } else {
+                        s.step = Step::Done { final_text: text };
+                        let end_seq = s.next_seq();
+                        events.push(Event::SessionEnd {
+                            ok: true,
+                            seq: end_seq,
+                        });
+                    }
                 } else {
                     s.step = Step::ToolBatch {
                         calls: tool_calls,
@@ -725,7 +898,7 @@ impl Runner {
             text_chars,
             tool_calls = tool_call_count,
             thinking_artifacts = thinking_count,
-            done = tool_call_count == 0,
+            done = tool_call_count == 0 && !stop_continues,
             "assistant message committed"
         );
         Ok(events)
@@ -844,12 +1017,17 @@ impl Runner {
 
         let call = calls[cursor].clone();
         let internal_result = internal_tool_result(&call);
+        let pre_hook_block = if internal_result.is_none() {
+            self.pre_tool_use_hook(state, &call).await
+        } else {
+            None
+        };
 
         // AtMostOnce protection: persist intent before execute. Same
         // StepAdvanced trick — the state change must be reflected in
         // event_seq so durable stores can distinguish it from a stale
         // overwrite.
-        let idem = if internal_result.is_some() {
+        let idem = if internal_result.is_some() || pre_hook_block.is_some() {
             Idempotency::Idempotent
         } else {
             self.tools.idempotency_for(&call)
@@ -908,17 +1086,23 @@ impl Runner {
             "tool call started"
         );
         let start_ms = self.clock.now_ms();
-        let result = match internal_result {
-            Some(result) => result,
-            None => {
+        let (mut result, ran_tool) = match (internal_result, pre_hook_block) {
+            (Some(result), _) => (result, false),
+            (None, Some(result)) => (result, false),
+            (None, None) => {
                 let cancel = self.cancel_lock().child();
-                self.tools
+                let result = self
+                    .tools
                     .execute(&call, &ctx, cancel)
                     .await
-                    .unwrap_or_else(ToolResult::framework_error)
+                    .unwrap_or_else(ToolResult::framework_error);
+                (result, true)
             }
         };
         let duration_ms = (self.clock.now_ms() - start_ms).max(0) as u32;
+        if ran_tool {
+            result = self.post_tool_use_hook(state, &call, result).await;
+        }
         let result_text = result.text();
         tracing::info!(
             target: "muagent::tool",
@@ -1208,6 +1392,7 @@ fn error_class_label(class: ErrorClass) -> &'static str {
         ErrorClass::Store(StoreErrClass::Transient) => "store_transient",
         ErrorClass::Store(StoreErrClass::Conflict) => "store_conflict",
         ErrorClass::Store(StoreErrClass::Fatal) => "store_fatal",
+        ErrorClass::PolicyDenied => "policy_denied",
         ErrorClass::Bug => "bug",
         ErrorClass::Cancelled => "cancelled",
     }
@@ -1250,6 +1435,30 @@ fn message_content_stats(msg: &Message) -> (usize, usize) {
     }
 }
 
+fn message_content_text(msg: &Message) -> String {
+    match msg {
+        Message::System { content }
+        | Message::User { content }
+        | Message::Assistant { content, .. } => content_text_projection(content),
+        Message::ToolResult { result, .. } => result.text(),
+        Message::Observation { text, .. } => text.clone(),
+    }
+}
+
+fn content_text_projection(content: &Content) -> String {
+    match content {
+        Content::Text(text) => text.clone(),
+        Content::Parts(parts) => parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.clone()),
+                ContentPart::Image { .. } | ContentPart::Data { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 fn content_stats(content: &Content) -> (usize, usize) {
     match content {
         Content::Text(text) => (text.chars().count(), 0),
@@ -1267,6 +1476,22 @@ fn content_stats(content: &Content) -> (usize, usize) {
             }
             (chars, attachments)
         }
+    }
+}
+
+fn append_tool_result_context(result: &mut ToolResult, context: &str) {
+    if context.trim().is_empty() {
+        return;
+    }
+    let note = format!("PostToolUse hook additional context:\n{context}");
+    match &mut result.content {
+        Content::Text(text) => {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(&note);
+        }
+        Content::Parts(parts) => parts.push(ContentPart::Text { text: note }),
     }
 }
 
@@ -1379,6 +1604,8 @@ pub struct RunnerBuilder {
     retry_policy: RetryPolicy,
     cache_key_strategy: CacheKeyStrategy,
     summary_recall: bool,
+    hooks: Option<Arc<dyn HookDispatcher>>,
+    hook_model: String,
 }
 
 impl RunnerBuilder {
@@ -1445,6 +1672,20 @@ impl RunnerBuilder {
         self.summary_recall = enabled;
         self
     }
+    /// Attach a Codex-style lifecycle hook dispatcher. Core only calls the
+    /// typed dispatcher; hosts decide whether that maps to command hooks,
+    /// in-process callbacks, remote policy engines, or no-op behavior.
+    pub fn hooks(mut self, h: Arc<dyn HookDispatcher>) -> Self {
+        self.hooks = Some(h);
+        self
+    }
+    /// Optional model label exposed in hook input JSON. Core's `ModelAdapter`
+    /// trait intentionally does not require a model id, so setup layers that
+    /// know the configured model can pass it here.
+    pub fn hook_model(mut self, model: impl Into<String>) -> Self {
+        self.hook_model = model.into();
+        self
+    }
 
     pub fn build(self) -> Result<Runner, RuntimeError> {
         Ok(Runner {
@@ -1471,6 +1712,8 @@ impl RunnerBuilder {
             retry_policy: self.retry_policy,
             cache_key_strategy: self.cache_key_strategy,
             summary_recall: self.summary_recall,
+            hooks: self.hooks.unwrap_or_else(|| Arc::new(NoopHookDispatcher)),
+            hook_model: self.hook_model,
         })
     }
 }
