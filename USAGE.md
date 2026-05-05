@@ -56,7 +56,7 @@ To test a package artifact without publishing:
 
 ```bash
 npm pack
-npm install -g ./muagent-0.1.1.tgz
+npm install -g ./muagent-0.1.2.tgz
 ```
 
 To run without a global install:
