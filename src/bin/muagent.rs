@@ -4,14 +4,17 @@
 
 use std::process::ExitCode;
 
+use std::sync::Arc;
+
 use muagent::cli;
-use muagent::cli_app::driver::run_one_shot;
+use muagent::cli_app::driver::{run_one_shot, run_one_shot_stream_json};
 use muagent::cli_app::print_banner;
 use muagent::cli_app::repl::run_repl;
 use muagent::cli_app::sessions::{pick_session_state, print_sessions};
 use muagent::cli_app::state::{
     ensure_workspace_root, new_run_state, resume_last_state, resume_session_state,
 };
+use muagent::cli_app::stream_json::StreamEmitter;
 #[cfg(feature = "tui")]
 use muagent::cli_app::tui_driver::{run_tui, run_tui_setup_error};
 use muagent::config::{Config, ConfigOverrides};
@@ -50,6 +53,7 @@ async fn run(invocation: cli::Invocation) -> Result<(), String> {
     };
     let clock = muagent::core::clock::SystemClock;
     let images = invocation.images;
+    let output_format = invocation.output_format;
 
     match invocation.mode {
         cli::RunMode::Repl => {
@@ -69,7 +73,23 @@ async fn run(invocation: cli::Invocation) -> Result<(), String> {
         }
         cli::RunMode::Exec(prompt) => {
             let mut state = new_run_state(&cfg, &clock);
-            run_one_shot(&wired.runner, &mut state, &prompt, &images).await
+            match output_format {
+                cli::OutputFormat::Text => {
+                    run_one_shot(&wired.runner, &mut state, &prompt, &images).await
+                }
+                cli::OutputFormat::StreamJson => {
+                    let emitter = Arc::new(StreamEmitter::new(state.session_id.to_string()));
+                    run_one_shot_stream_json(
+                        &wired.runner,
+                        &mut state,
+                        &prompt,
+                        &images,
+                        emitter,
+                        false,
+                    )
+                    .await
+                }
+            }
         }
         cli::RunMode::ResumePicker { all } => {
             if !images.is_empty() {
@@ -90,6 +110,7 @@ async fn run(invocation: cli::Invocation) -> Result<(), String> {
                 prompt,
                 tui,
                 &images,
+                output_format,
             )
             .await
         }
@@ -111,6 +132,7 @@ async fn run(invocation: cli::Invocation) -> Result<(), String> {
                 prompt,
                 tui,
                 &images,
+                output_format,
             )
             .await
         }
@@ -133,9 +155,26 @@ async fn dispatch_resumed(
     prompt: Option<String>,
     tui: bool,
     images: &[String],
+    output_format: cli::OutputFormat,
 ) -> Result<(), String> {
     if let Some(prompt) = prompt {
-        return run_one_shot(&wired.runner, &mut state, &prompt, images).await;
+        return match output_format {
+            cli::OutputFormat::Text => {
+                run_one_shot(&wired.runner, &mut state, &prompt, images).await
+            }
+            cli::OutputFormat::StreamJson => {
+                let emitter = Arc::new(StreamEmitter::new(state.session_id.to_string()));
+                run_one_shot_stream_json(
+                    &wired.runner,
+                    &mut state,
+                    &prompt,
+                    images,
+                    emitter,
+                    true,
+                )
+                .await
+            }
+        };
     }
     if !images.is_empty() {
         return Err("--image requires a prompt when resuming".into());

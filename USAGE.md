@@ -164,11 +164,13 @@ Codex OAuth behavior.
 | `muagent` | Start the full-screen TUI |
 | `muagent <PROMPT>` | Start the TUI and submit an initial prompt |
 | `muagent exec <PROMPT>` | Run one task and exit |
+| `muagent exec --output-format stream-json <PROMPT>` | Run one task and emit NDJSON events on stdout (see [Stream-JSON Output](#stream-json-output)) |
 | `muagent repl` or `muagent --repl` | Start the line-mode REPL |
 | `muagent resume` | Pick a persisted session from the current workspace |
 | `muagent resume --last [PROMPT]` | Resume the latest session in the current workspace |
 | `muagent resume <SESSION_ID> [PROMPT]` | Resume a specific session |
 | `muagent exec resume --last <PROMPT>` | Resume the latest session, run one turn, and exit |
+| `muagent exec resume <SESSION_ID> <PROMPT>` | Resume a specific session, run one turn, and exit |
 | `muagent sessions` | List persisted sessions for the current workspace |
 | `muagent sessions --all` | List persisted sessions across all workspaces |
 
@@ -262,6 +264,59 @@ If a prompt starts with `-`, separate flags from the prompt with `--`:
 muagent -- "- This prompt starts with a dash."
 ```
 
+## Stream-JSON Output
+
+`exec` and `exec resume` accept `--output-format <FMT>` to switch stdout
+from human-readable text to a structured event stream that a host process
+can parse line-by-line. This is what lets a UI drive `muagent exec` as a
+backend instead of tailing the on-disk session log.
+
+| Value | Behavior |
+|---|---|
+| `text` (default) | Human-readable: prints the assistant's final reply on stdout when the turn finishes |
+| `stream-json` | One JSON object per line on stdout, terminated with `\n`, flushed per event |
+
+```bash
+muagent exec --output-format stream-json "Summarize this repo."
+muagent exec resume --last --output-format stream-json "Continue."
+muagent exec resume <SESSION_ID> --output-format stream-json "Next step."
+```
+
+Stream invariants:
+
+- **NDJSON**: one JSON object per line, no pretty-printing or multi-line records.
+- **stdout is event-only**: logs, progress, and warnings always go to stderr.
+- **Flush per event**: every line is flushed at emission so hosts can render
+  streaming progress.
+- **Forward compatibility**: hosts should ignore unknown event types and
+  unknown fields. Adding fields is non-breaking; renaming or removing them is.
+
+Event types emitted on a successful turn (in arrival order):
+
+| Type | Purpose |
+|---|---|
+| `session_started` | First line; carries `session_id` and `resumed` (true on `exec resume`) |
+| `assistant_text` | Streaming assistant text deltas; concatenate in arrival order |
+| `tool_call_start` | Tool invocation begins; carries `tool_call_id`, `tool_name`, `input` |
+| `tool_call_result` | Matching `tool_call_id`; carries `ok`, `output`, `error` |
+| `result` | Terminal event on success: `final_text`, `is_error: false`, `session_id`, `cost_usd`, `usage` |
+| `error` | Terminal event on failure (replaces `result`): `message`, `stage`, `session_id` |
+
+A turn always ends with **exactly one** of `result` or `error`, then the
+process exits. `stage` on `error` is a coarse classifier (`submit`, `step`,
+`provider`, `cancelled`, ...) that tells a host whether to retry or surface
+the failure.
+
+Built-in `tool_name` values are `fs_read`, `fs_write`, `fs_edit`, `fs_list`,
+`fs_stat`, `fs_delete`, `fs_rename`, `sh_exec`. Hosts can use the raw
+`input` object (e.g. `command` for `sh_exec`) to render semantic labels.
+
+`--output-format` is rejected on the TUI, REPL, plain `resume` (interactive
+picker), and `sessions` — those modes always render text.
+
+The full schema and integration rationale are in
+[STREAM_JSON.md](STREAM_JSON.md).
+
 ## Options Reference
 
 | Option | Description |
@@ -287,6 +342,7 @@ muagent -- "- This prompt starts with a dash."
 | `--skills <LIST>`, `--enable-skills <LIST>` | Expose only the listed skill IDs |
 | `--disable-skills <LIST>` | Hide the listed skill IDs |
 | `--no-skills-autoload` | Disable automatic skill discovery |
+| `--output-format <FMT>` | `text` (default) or `stream-json`; only valid on `exec` and `exec resume`. See [Stream-JSON Output](#stream-json-output). |
 
 List arguments use commas:
 
@@ -333,6 +389,15 @@ Use a temporary project config:
 
 ```bash
 muagent --config-file .muagent/config.toml exec "Use this project's defaults."
+```
+
+Drive `exec` from a host process and parse events line-by-line:
+
+```bash
+muagent exec --output-format stream-json "Summarize this repo." \
+  | while IFS= read -r line; do
+      echo "event: $(echo "$line" | jq -r .type)"
+    done
 ```
 
 ## TUI Notes

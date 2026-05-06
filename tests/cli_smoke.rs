@@ -109,3 +109,29 @@ async fn cli_unknown_flag_exits_nonzero() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("unknown argument"));
 }
+
+#[tokio::test]
+async fn cli_help_documents_output_format_flag() {
+    let out = run_output(&["--help"]).await;
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--output-format"),
+        "--output-format help missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("stream-json"),
+        "stream-json doc missing: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn cli_output_format_rejects_unknown_value() {
+    let out = run_output(&["exec", "--output-format", "yaml", "Hello"]).await;
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--output-format"),
+        "expected --output-format error: {stderr}"
+    );
+}

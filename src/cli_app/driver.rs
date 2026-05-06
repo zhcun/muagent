@@ -1,11 +1,14 @@
 //! Drive a `Runner` to completion, fan events out to log/TUI sinks, and
 //! enforce the per-run safety budgets (max steps, no-progress fuse).
 
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::cli_app::event_render::{event_tui_updates, tool_display_label, tool_result_extra_line};
 use crate::cli_app::image::user_content;
+use crate::cli_app::stream_json::StreamEmitter;
 use crate::cli_app::truncate;
 use crate::cli_app::DEFAULT_MAX_STEPS;
 use crate::core::event::Event;
@@ -67,6 +70,67 @@ pub async fn run_one_shot(
     }
 }
 
+/// Stream-JSON variant of `run_one_shot`. Emits NDJSON events on stdout
+/// (via `emitter`) instead of printing the final assistant text. Errors
+/// from this code path are emitted as a terminal `error` event before
+/// returning so the host always sees exactly one of `result` / `error`.
+pub async fn run_one_shot_stream_json(
+    runner: &Runner,
+    state: &mut RunState,
+    prompt: &str,
+    images: &[String],
+    emitter: Arc<StreamEmitter>,
+    resumed: bool,
+) -> Result<(), String> {
+    emitter.emit_session_started(resumed);
+    let content = match user_content(prompt, images) {
+        Ok(c) => c,
+        Err(e) => {
+            emitter.emit_error(&e, "submit");
+            return Err(e);
+        }
+    };
+    if let Err(e) = runner
+        .submit_user_message(state, Message::User { content })
+        .await
+    {
+        let msg = format!("submit_user_message failed: {e:?}");
+        emitter.emit_error(&msg, "submit");
+        return Err(msg);
+    }
+    if let Err(e) = drive_until_terminal_with_updates_and_emitter(
+        runner,
+        state,
+        None,
+        Some(emitter.clone()),
+    )
+    .await
+    {
+        emitter.emit_error(&e, "step");
+        return Err(e);
+    }
+    match &state.step {
+        Step::Done { final_text } => {
+            emitter.emit_result(final_text, false, &state.usage);
+            Ok(())
+        }
+        Step::Failed { reason, .. } => {
+            emitter.emit_error(reason, "step");
+            Err(format!("run failed: {reason}"))
+        }
+        Step::Paused { reason } => {
+            let msg = format!("run paused: {reason:?}");
+            emitter.emit_error(&msg, "cancelled");
+            Err(msg)
+        }
+        other => {
+            let msg = format!("run did not finish; final step={other:?}");
+            emitter.emit_error(&msg, "step");
+            Err(msg)
+        }
+    }
+}
+
 pub async fn submit_and_drive(
     runner: &Runner,
     state: &mut RunState,
@@ -111,6 +175,15 @@ pub async fn drive_until_terminal_with_updates(
     state: &mut RunState,
     updates: Option<mpsc::UnboundedSender<TuiUpdate>>,
 ) -> Result<(), String> {
+    drive_until_terminal_with_updates_and_emitter(runner, state, updates, None).await
+}
+
+pub async fn drive_until_terminal_with_updates_and_emitter(
+    runner: &Runner,
+    state: &mut RunState,
+    updates: Option<mpsc::UnboundedSender<TuiUpdate>>,
+    emitter: Option<Arc<StreamEmitter>>,
+) -> Result<(), String> {
     let budget = StepBudget::from_env();
     let mut bad_tool_events = 0usize;
     for _ in 0..budget.max_steps {
@@ -118,10 +191,11 @@ pub async fn drive_until_terminal_with_updates(
             return Ok(());
         }
         send_tui_activity(&updates, step_activity_label(&state.step));
-        emit_running_tool_start(&updates, &state.step);
+        emit_running_tool_start(&updates, emitter.as_ref(), &state.step);
         let prompt_before = state.usage.tokens_prompt;
         let completion_before = state.usage.tokens_completion;
-        let (stream_tx, stream_forwarder) = model_stream_forwarder(&updates, &state.step);
+        let (stream_tx, stream_forwarder) =
+            model_stream_forwarder(&updates, emitter.as_ref(), &state.step);
         let step_result = if let Some(tx) = stream_tx.clone() {
             runner.step_with_model_stream(state, Some(tx)).await
         } else {
@@ -136,7 +210,14 @@ pub async fn drive_until_terminal_with_updates(
             format!("runner step failed: {e:?}")
         })?;
         emit_step_token_delta(&updates, state, prompt_before, completion_before);
-        process_step_events(&updates, &out.events, &mut bad_tool_events, &budget)?;
+        process_step_events(
+            &updates,
+            emitter.as_ref(),
+            state,
+            &out.events,
+            &mut bad_tool_events,
+            &budget,
+        )?;
     }
     if is_terminal(&state.step) {
         return Ok(());
@@ -151,7 +232,11 @@ pub async fn drive_until_terminal_with_updates(
     ))
 }
 
-fn emit_running_tool_start(updates: &Option<mpsc::UnboundedSender<TuiUpdate>>, step: &Step) {
+fn emit_running_tool_start(
+    updates: &Option<mpsc::UnboundedSender<TuiUpdate>>,
+    emitter: Option<&Arc<StreamEmitter>>,
+    step: &Step,
+) {
     let Step::ToolBatch { calls, cursor } = step else {
         return;
     };
@@ -167,10 +252,14 @@ fn emit_running_tool_start(updates: &Option<mpsc::UnboundedSender<TuiUpdate>>, s
         },
     );
     send_tui_activity(updates, format!("Running {display}"));
+    if let Some(emitter) = emitter {
+        emitter.emit_tool_call_start(&call.id, &call.tool_name, &call.args);
+    }
 }
 
 fn model_stream_forwarder(
     updates: &Option<mpsc::UnboundedSender<TuiUpdate>>,
+    emitter: Option<&Arc<StreamEmitter>>,
     step: &Step,
 ) -> (
     Option<mpsc::UnboundedSender<ModelStreamEvent>>,
@@ -179,18 +268,27 @@ fn model_stream_forwarder(
     if !matches!(step, Step::ModelTurn) {
         return (None, None);
     }
-    let Some(tui_tx) = updates.as_ref().cloned() else {
+    let tui_tx = updates.as_ref().cloned();
+    let stream_emitter = emitter.cloned();
+    if tui_tx.is_none() && stream_emitter.is_none() {
         return (None, None);
-    };
+    }
     let (tx, mut rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 ModelStreamEvent::TextDelta(text) => {
-                    let _ = tui_tx.send(TuiUpdate::AssistantDelta(text));
+                    if let Some(emitter) = &stream_emitter {
+                        emitter.emit_assistant_text(&text);
+                    }
+                    if let Some(tx) = &tui_tx {
+                        let _ = tx.send(TuiUpdate::AssistantDelta(text));
+                    }
                 }
                 ModelStreamEvent::Reset => {
-                    let _ = tui_tx.send(TuiUpdate::AssistantStreamReset);
+                    if let Some(tx) = &tui_tx {
+                        let _ = tx.send(TuiUpdate::AssistantStreamReset);
+                    }
                 }
             }
         }
@@ -268,6 +366,8 @@ fn emit_step_token_delta(
 /// fuse trips.
 fn process_step_events(
     updates: &Option<mpsc::UnboundedSender<TuiUpdate>>,
+    emitter: Option<&Arc<StreamEmitter>>,
+    state: &RunState,
     events: &[Event],
     bad_tool_events: &mut usize,
     budget: &StepBudget,
@@ -291,6 +391,10 @@ fn process_step_events(
                 ..
             } => {
                 emit_tool_call_end(updates, pending_tool.take(), call_id, *ok, brief, detail);
+                if let Some(emitter) = emitter {
+                    let (output, error) = tool_output_from_history(state, call_id, *ok, brief);
+                    emitter.emit_tool_call_result(call_id, *ok, &output, error.as_deref());
+                }
             }
             _ => {
                 for update in event_tui_updates(ev) {
@@ -311,6 +415,34 @@ fn process_step_events(
         }
     }
     Ok(())
+}
+
+/// Pull the raw tool output text out of `state.history` for a freshly
+/// finished tool call. Falls back to the event's `brief` summary if the
+/// history entry can't be located (defensive — the runner always appends).
+/// On failure, returns the error text in the second slot too so
+/// stream-json hosts that key off `error` see a non-null value.
+fn tool_output_from_history(
+    state: &RunState,
+    call_id: &str,
+    ok: bool,
+    brief: &str,
+) -> (String, Option<String>) {
+    let result_text = state.history.iter().rev().find_map(|m| {
+        if let Message::ToolResult {
+            call_id: cid,
+            result,
+        } = m
+        {
+            if cid == call_id {
+                return Some(result.text());
+            }
+        }
+        None
+    });
+    let output = result_text.unwrap_or_else(|| brief.to_string());
+    let error = if ok { None } else { Some(output.clone()) };
+    (output, error)
 }
 
 fn emit_tool_call_end(

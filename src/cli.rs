@@ -69,6 +69,28 @@ pub struct Invocation {
     pub mode: RunMode,
     pub images: Vec<String>,
     pub config: ConfigOverrides,
+    pub output_format: OutputFormat,
+}
+
+/// Stdout format for non-interactive `exec` / `exec resume`. Other modes
+/// always render text and reject `--output-format` at parse time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    #[default]
+    Text,
+    StreamJson,
+}
+
+impl OutputFormat {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "text" => Ok(Self::Text),
+            "stream-json" => Ok(Self::StreamJson),
+            other => Err(format!(
+                "muagent: --output-format must be `text` or `stream-json` (got `{other}`)"
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -280,7 +302,14 @@ fn parse_from(args: Vec<String>) -> Action {
                 return parse_exec(&args[i + 1..], images, config);
             }
             "resume" => {
-                return parse_resume(&args[i + 1..], false, tui, images, config);
+                return parse_resume(
+                    &args[i + 1..],
+                    false,
+                    tui,
+                    images,
+                    config,
+                    OutputFormat::default(),
+                );
             }
             "sessions" | "session" | "list" => {
                 return parse_sessions(&args[i + 1..], images, config);
@@ -341,6 +370,7 @@ fn parse_exec(args: &[String], mut images: Vec<String>, mut config: ConfigOverri
         return Action::Exit(ExitCode::from(2));
     }
     let mut i = 0;
+    let mut output_format = OutputFormat::Text;
     while i < args.len() {
         match parse_common_option(args, &mut i, &mut config, Some(&mut images), None) {
             Ok(true) => continue,
@@ -356,18 +386,47 @@ fn parse_exec(args: &[String], mut images: Vec<String>, mut config: ConfigOverri
                     return Action::Exit(missing(&args[i]));
                 }
             }
-            "resume" => return parse_resume(&args[i + 1..], true, false, images, config),
+            "--output-format" => {
+                let Some(v) = args.get(i + 1) else {
+                    return Action::Exit(missing(&args[i]));
+                };
+                match OutputFormat::parse(v) {
+                    Ok(fmt) => {
+                        output_format = fmt;
+                        i += 2;
+                    }
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        return Action::Exit(ExitCode::from(2));
+                    }
+                }
+            }
+            "resume" => {
+                return parse_resume(&args[i + 1..], true, false, images, config, output_format);
+            }
             "--" => {
                 if i + 1 >= args.len() {
                     break;
                 }
-                return run(RunMode::Exec(args[i + 1..].join(" ")), images, config);
+                return run_with_format(
+                    RunMode::Exec(args[i + 1..].join(" ")),
+                    images,
+                    config,
+                    output_format,
+                );
             }
             other if other.starts_with('-') => {
                 eprintln!("muagent: unknown exec argument `{other}`. Try --help.");
                 return Action::Exit(ExitCode::from(2));
             }
-            _ => return run(RunMode::Exec(args[i..].join(" ")), images, config),
+            _ => {
+                return run_with_format(
+                    RunMode::Exec(args[i..].join(" ")),
+                    images,
+                    config,
+                    output_format,
+                );
+            }
         }
     }
     eprintln!("muagent: `exec` requires a prompt, or `exec resume --last <prompt>`");
@@ -380,6 +439,7 @@ fn parse_resume(
     mut tui: bool,
     mut images: Vec<String>,
     mut config: ConfigOverrides,
+    mut output_format: OutputFormat,
 ) -> Action {
     if args.is_empty() && !prompt_required {
         return run(RunMode::ResumePicker { all: false }, images, config);
@@ -414,6 +474,21 @@ fn parse_resume(
                 all = true;
                 i += 1;
             }
+            "--output-format" if prompt_required => {
+                let Some(v) = args.get(i + 1) else {
+                    return Action::Exit(missing(a));
+                };
+                match OutputFormat::parse(v) {
+                    Ok(fmt) => {
+                        output_format = fmt;
+                        i += 2;
+                    }
+                    Err(msg) => {
+                        eprintln!("{msg}");
+                        return Action::Exit(ExitCode::from(2));
+                    }
+                }
+            }
             "--" => {
                 i += 1;
                 prompt_start = Some(i);
@@ -445,9 +520,14 @@ fn parse_resume(
 
     let tui = tui && prompt.is_none() && !prompt_required;
     if last {
-        run(RunMode::ResumeLast { prompt, tui }, images, config)
+        run_with_format(
+            RunMode::ResumeLast { prompt, tui },
+            images,
+            config,
+            output_format,
+        )
     } else if let Some(session_id) = session_id {
-        run(
+        run_with_format(
             RunMode::ResumeSession {
                 session_id,
                 prompt,
@@ -455,9 +535,15 @@ fn parse_resume(
             },
             images,
             config,
+            output_format,
         )
     } else if prompt.is_some() {
-        run(RunMode::ResumeLast { prompt, tui }, images, config)
+        run_with_format(
+            RunMode::ResumeLast { prompt, tui },
+            images,
+            config,
+            output_format,
+        )
     } else {
         run(RunMode::ResumePicker { all }, images, config)
     }
@@ -593,10 +679,20 @@ fn value(
 }
 
 fn run(mode: RunMode, images: Vec<String>, config: ConfigOverrides) -> Action {
+    run_with_format(mode, images, config, OutputFormat::default())
+}
+
+fn run_with_format(
+    mode: RunMode,
+    images: Vec<String>,
+    config: ConfigOverrides,
+    output_format: OutputFormat,
+) -> Action {
     Action::Run(Box::new(Invocation {
         mode,
         images,
         config,
+        output_format,
     }))
 }
 
@@ -701,6 +797,14 @@ OPTIONS:
       --no-skills-autoload
                           Don't auto-load skills from `./.muagent/skills/`
                           and `~/.muagent/skills/`. (env: MUAGENT_SKILL_AUTOLOAD=off)
+      --output-format <FMT>
+                          `text` (default) prints the assistant's final reply
+                          on stdout. `stream-json` switches stdout to one
+                          NDJSON event per line (session_started, assistant_text,
+                          tool_call_start, tool_call_result, result, error) so
+                          a host can drive `muagent exec` as a backend. Logs
+                          and progress always go to stderr. Only valid on
+                          `exec` and `exec resume`.
 
 ENVIRONMENT:
   One of these must be set (depending on --provider):
@@ -889,7 +993,7 @@ fn atty_stderr() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_from, Action, Invocation, RunMode};
+    use super::{parse_from, Action, Invocation, OutputFormat, RunMode};
 
     fn mode(args: &[&str]) -> RunMode {
         invocation(args).mode
@@ -1184,5 +1288,82 @@ mod tests {
                 tui: false,
             }
         );
+    }
+
+    #[test]
+    fn output_format_defaults_to_text() {
+        let got = invocation(&["exec", "Hello"]);
+        assert_eq!(got.output_format, OutputFormat::Text);
+    }
+
+    #[test]
+    fn exec_accepts_output_format_stream_json() {
+        let got = invocation(&["exec", "--output-format", "stream-json", "Hello"]);
+        assert_eq!(got.mode, RunMode::Exec("Hello".into()));
+        assert_eq!(got.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn exec_resume_last_accepts_output_format() {
+        let got = invocation(&[
+            "exec",
+            "resume",
+            "--output-format",
+            "stream-json",
+            "--last",
+            "Continue",
+        ]);
+        assert_eq!(
+            got.mode,
+            RunMode::ResumeLast {
+                prompt: Some("Continue".into()),
+                tui: false,
+            }
+        );
+        assert_eq!(got.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn exec_resume_session_accepts_output_format() {
+        let session_id = "36dc8f89-57f0-46cf-9510-f6641fc86706";
+        let got = invocation(&[
+            "exec",
+            "resume",
+            session_id,
+            "--output-format",
+            "stream-json",
+            "Continue",
+        ]);
+        assert_eq!(
+            got.mode,
+            RunMode::ResumeSession {
+                session_id: session_id.into(),
+                prompt: Some("Continue".into()),
+                tui: false,
+            }
+        );
+        assert_eq!(got.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn output_format_rejects_unknown_value() {
+        let parsed = parse_from(
+            ["exec", "--output-format", "yaml", "Hello"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        assert!(matches!(parsed, Action::Exit(_)));
+    }
+
+    #[test]
+    fn output_format_not_accepted_outside_exec() {
+        let parsed = parse_from(
+            ["--output-format", "stream-json"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        assert!(matches!(parsed, Action::Exit(_)));
     }
 }

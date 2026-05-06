@@ -124,12 +124,22 @@ muagent resume <SESSION_ID>
 muagent exec resume --last "Continue the previous task."
 muagent exec resume <SESSION_ID> "Continue this session and run one turn."
 muagent --provider openai resume --last
+
+# Stream-JSON output (drive `exec` as a backend)
+muagent exec --output-format stream-json "Summarize this repo."
+muagent exec resume --last --output-format stream-json "Continue."
 ```
+
+`--output-format stream-json` swaps `exec`'s stdout for one NDJSON event per
+line so a host process can render streaming progress. See [USAGE.md](USAGE.md#stream-json-output)
+and [STREAM_JSON.md](STREAM_JSON.md) for the event schema.
 
 ## Documentation
 
 - [USAGE.md](USAGE.md): CLI modes, TUI commands, tools, skills, and session
   usage
+- [STREAM_JSON.md](STREAM_JSON.md): NDJSON event schema for
+  `muagent exec --output-format stream-json` (host integrations)
 - [CONFIG.md](CONFIG.md): provider defaults, config files, model capabilities,
   and OAuth
 - [HOOKS.md](HOOKS.md): core lifecycle hook API for host integrations

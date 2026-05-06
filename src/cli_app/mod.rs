@@ -11,6 +11,7 @@ pub mod repl;
 pub mod sessions;
 pub mod sink;
 pub mod state;
+pub mod stream_json;
 #[cfg(feature = "tui")]
 pub mod tui_driver;
 #[cfg(feature = "tui")]
