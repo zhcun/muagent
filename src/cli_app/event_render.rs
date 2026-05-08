@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::cli_app::driver::TuiUpdate;
 use crate::cli_app::truncate;
 use crate::core::event::Event;
+use crate::core::prelude::SUBAGENT_TOOL_NAME;
 
 pub fn event_tui_updates(ev: &Event) -> Vec<TuiUpdate> {
     match ev {
@@ -98,6 +99,7 @@ pub fn tool_display_label(tool: &str, args: &serde_json::Value) -> String {
                 display_file_uri(&s(args, "to"))
             ),
         ),
+        SUBAGENT_TOOL_NAME => return subagent_display_label(args),
         other => {
             let fallback = generic_args_label(args);
             return if fallback.is_empty() {
@@ -108,6 +110,25 @@ pub fn tool_display_label(tool: &str, args: &serde_json::Value) -> String {
         }
     };
     format!("{display_name}({body})")
+}
+
+fn subagent_display_label(args: &Value) -> String {
+    let agent = args
+        .get("subagent")
+        .or_else(|| args.get("agent"))
+        .or_else(|| args.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("subagent");
+    let task = args
+        .get("task")
+        .or_else(|| args.get("prompt"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if task.trim().is_empty() {
+        format!("Subagent({})", one_line(agent, 40))
+    } else {
+        format!("Subagent({}: {})", one_line(agent, 32), one_line(task, 72))
+    }
 }
 
 fn sh_exec_display_label(args: &Value) -> String {
@@ -362,6 +383,40 @@ pub fn tool_result_extra_line(tool: &str, detail: &serde_json::Value) -> Option<
             }
             Some(one_line(&parts.join(" · "), 160))
         }
+        SUBAGENT_TOOL_NAME => {
+            let agent = detail
+                .get("agent_name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("subagent");
+            let turns = detail
+                .get("usage")
+                .and_then(|usage| usage.get("turns"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let tool_calls = detail
+                .get("usage")
+                .and_then(|usage| usage.get("tool_calls"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let final_text = detail
+                .get("final_text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let mut parts = vec![agent.to_string()];
+            if turns > 0 {
+                parts.push(format!("{turns} turn{}", if turns == 1 { "" } else { "s" }));
+            }
+            if tool_calls > 0 {
+                parts.push(format!(
+                    "{tool_calls} tool{}",
+                    if tool_calls == 1 { "" } else { "s" }
+                ));
+            }
+            if !final_text.trim().is_empty() {
+                parts.push(format!("result: {}", one_line(final_text, 72)));
+            }
+            Some(one_line(&parts.join(" · "), 160))
+        }
         _ => None,
     }
 }
@@ -383,6 +438,7 @@ mod tests {
     use super::{event_tui_updates, tool_display_label};
     use crate::cli_app::driver::TuiUpdate;
     use crate::core::event::Event;
+    use crate::core::prelude::SUBAGENT_TOOL_NAME;
 
     #[test]
     fn built_in_tool_labels_show_current_arg_names() {
@@ -420,6 +476,13 @@ mod tests {
                 &json!({"action":"wait","job_id":"sh_5eec44a5e0b04ea5bf9f46f74d694fa6"})
             ),
             "Wait(background job)"
+        );
+        assert_eq!(
+            tool_display_label(
+                SUBAGENT_TOOL_NAME,
+                &json!({"subagent":"reviewer","task":"Check the patch for correctness issues."})
+            ),
+            "Subagent(reviewer: Check the patch for correctness issues.)"
         );
     }
 
@@ -484,6 +547,21 @@ mod tests {
                 })
             ),
             Some("bash · exit 0 · out 20B · err 0B · out: found 12 files / ok".into())
+        );
+    }
+
+    #[test]
+    fn subagent_extra_line_summarizes_result() {
+        assert_eq!(
+            super::tool_result_extra_line(
+                SUBAGENT_TOOL_NAME,
+                &json!({
+                    "agent_name":"reviewer",
+                    "final_text":"DXB-442",
+                    "usage":{"turns":2,"tool_calls":1}
+                })
+            ),
+            Some("reviewer · 2 turns · 1 tool · result: DXB-442".into())
         );
     }
 

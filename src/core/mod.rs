@@ -35,6 +35,7 @@ pub mod runner;
 pub mod sanitize;
 pub mod step;
 pub mod store;
+pub mod subagent;
 pub mod summary_recall;
 pub mod thinking;
 pub mod tool;
@@ -75,6 +76,10 @@ pub mod prelude {
         runner::{Runner, RunnerBuilder, StepOutput},
         step::{PauseReason, Step},
         store::{AuditFilter, RunFilter, RunHeader, RunStatus, SessionStore, ToolAuditRecord},
+        subagent::{
+            AgentDefinition, SubagentContextMode, SubagentInvocation, SubagentResult,
+            DEFAULT_SUBAGENT_MAX_STEPS, SUBAGENT_TOOL_NAME,
+        },
         thinking::{
             ReplayPolicy, ThinkingArtifact, ThinkingBudget, ThinkingConfig, ThinkingEffort,
             ThinkingKind, ThinkingMode, ThinkingPayload, ThinkingSupport, ThinkingVisibility,

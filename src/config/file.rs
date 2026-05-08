@@ -269,6 +269,10 @@ fn is_known_config_key(key: &str) -> bool {
             | "agent_md.enabled"
             | "agent_md.max_bytes"
             | "agent_md.max_bytes_per_file"
+            | "subagents.enabled"
+            | "subagents.enable"
+            | "subagent_tools.enabled"
+            | "agent_tool.enabled"
     )
 }
 

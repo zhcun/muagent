@@ -25,6 +25,7 @@ use crate::core::run_state::RunState;
 use crate::core::run_state::Usage;
 use crate::core::step::{PauseReason, Step};
 use crate::core::store::SessionStore;
+use crate::core::subagent::{SubagentResult, SUBAGENT_TOOL_NAME};
 use crate::core::summary_recall::insert_summary_recall_before_latest_user;
 use crate::core::thinking::ThinkingConfig;
 use crate::core::tool::{
@@ -1189,6 +1190,7 @@ impl Runner {
         let res_retryable = result.retryable;
         let res_brief = result.brief();
         let res_detail = result.detail.clone().unwrap_or(serde_json::Value::Null);
+        let usage_delta = tool_usage_delta(&call.tool_name, &result);
         let result_for_push = result.clone();
         let events = self
             .commit(state, |s| {
@@ -1196,6 +1198,9 @@ impl Runner {
                 s.push_tool_result(&call_id, &result_for_push);
                 let end_seq = s.next_seq();
                 s.usage.tool_calls = s.usage.tool_calls.saturating_add(1);
+                if let Some(delta) = &usage_delta {
+                    add_usage_delta(&mut s.usage, delta);
+                }
                 s.step = Step::ToolBatch {
                     calls,
                     cursor: cursor + 1,
@@ -1554,6 +1559,33 @@ fn idempotency_label(idem: Idempotency) -> &'static str {
         Idempotency::AtMostOnce => "at_most_once",
         Idempotency::AtLeastOnce => "at_least_once",
     }
+}
+
+fn tool_usage_delta(tool_name: &str, result: &ToolResult) -> Option<Usage> {
+    if tool_name != SUBAGENT_TOOL_NAME || !result.ok {
+        return None;
+    }
+    let detail = result.detail.as_ref()?;
+    serde_json::from_value::<SubagentResult>(detail.clone())
+        .ok()
+        .map(|subagent| subagent.usage)
+}
+
+fn add_usage_delta(total: &mut Usage, delta: &Usage) {
+    total.tokens_prompt = total.tokens_prompt.saturating_add(delta.tokens_prompt);
+    total.tokens_completion = total
+        .tokens_completion
+        .saturating_add(delta.tokens_completion);
+    total.cost_usd += delta.cost_usd;
+    total.turns = total.turns.saturating_add(delta.turns);
+    total.tool_calls = total.tool_calls.saturating_add(delta.tool_calls);
+    total.tokens_cache_read = total
+        .tokens_cache_read
+        .saturating_add(delta.tokens_cache_read);
+    total.tokens_cache_write = total
+        .tokens_cache_write
+        .saturating_add(delta.tokens_cache_write);
+    total.tokens_thinking = total.tokens_thinking.saturating_add(delta.tokens_thinking);
 }
 
 fn internal_tool_result(call: &PendingCall) -> Option<ToolResult> {

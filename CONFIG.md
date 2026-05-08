@@ -241,7 +241,16 @@ max_summary_rounds = 4
 [agent_md]
 enabled = true
 max_bytes = 65536
+
+[subagents]
+# When enabled and at least one .muagent/agents/*.md definition exists, the
+# `spawn_sub_agent` delegation tool is exposed by default.
+enabled = true
 ```
+
+Subagent invocations are capped at depth 1. A subagent never receives the
+`spawn_sub_agent` tool, even if it is inherited or listed in `tools`. A parent
+agent can run at most 8 subagent calls concurrently.
 
 ## Common Recipes
 
@@ -283,6 +292,30 @@ Use a project-local session store:
 ```toml
 [store]
 path = "jsonl:.muagent/sessions"
+```
+
+Define a project subagent:
+
+```bash
+mkdir -p .muagent/agents
+$EDITOR .muagent/agents/reviewer.md
+```
+
+```markdown
+---
+name: reviewer
+description: Reviews code changes for correctness issues.
+tools: fs_read, fs_list
+max_steps: 200
+---
+Read the relevant files and report concrete bugs only.
+```
+
+Disable subagent tools:
+
+```toml
+[subagents]
+enabled = false
 ```
 
 Tune compaction for a smaller context model:

@@ -15,7 +15,10 @@ use crate::core::cancel::CancelToken;
 use crate::core::error::ModelError;
 use crate::core::net::{check_model_status, net_err_to_model, HttpMethod, HttpReq, NetEgress};
 use crate::core::prelude::{LlmCaps, ModelAdapter, ModelReply, ModelRequest, TokenUsage};
-use crate::core::thinking::{ThinkingEffort, ThinkingMode, ThinkingSupport};
+use crate::core::thinking::{
+    ReplayPolicy, ThinkingArtifact, ThinkingEffort, ThinkingKind, ThinkingMode, ThinkingPayload,
+    ThinkingSupport, ThinkingVisibility,
+};
 use crate::core::tool::{PendingCall, ToolDescriptor, TOOL_PROTOCOL_ERROR_TOOL};
 use crate::core::types::{Content, ContentPart, Message};
 
@@ -102,25 +105,26 @@ fn cache_marked_system_message(system: &str) -> Value {
 /// - Official provider (api.openai.com) OR OpenRouter routing to a known
 ///   first-party family/model (`openai/*`, `anthropic/*`, `google/*`,
 ///   `mistralai/*`, `meta-llama/*`, `cohere/*`, `x-ai/*`,
-///   `moonshotai/kimi-k2*`) → trust it, enable all standard caps. Vision is
-///   family-based: official OpenAI/Azure OpenAI and OpenRouter `openai/*`,
-///   `anthropic/*`, `google/*`, `x-ai/*` are treated as image-capable; other
-///   trusted families stay conservative unless overridden via `.with_caps()`.
+///   `moonshotai/kimi-k2*`, `tencent/hy3-preview*`) → trust it, enable all
+///   standard caps. Vision is family-based: official OpenAI/Azure OpenAI and
+///   OpenRouter `openai/*`, `anthropic/*`, `google/*`, `x-ai/*` are treated
+///   as image-capable; other trusted families stay conservative unless
+///   overridden via `.with_caps()`.
+///
+/// - OpenAI-compatible routes default to reasoning support. Most current
+///   OpenAI-compatible hosted models accept a coarse reasoning effort knob;
+///   replay still stays `NoReplay`. Disable with a config capability override
+///   when a specific endpoint rejects reasoning parameters.
 ///
 /// - Anything else (raw 127.0.0.1 Ollama, vLLM self-hosted, unknown
 ///   cloud) → **conservative default**: native tool-use OFF, vision OFF,
-///   thinking NONE, prompt_cache OFF. JSON mode stays on because many
+///   prompt_cache OFF. JSON mode stays on because many
 ///   OpenAI-compatible servers implement it even when they do not implement
 ///   `tools`. Caller overrides via `.with_caps()` when they know the model's
 ///   real capabilities.
 pub fn infer_caps(base_url: &str, model: &str) -> LlmCaps {
     let trusted = is_trusted_endpoint(base_url, model);
     let vision = trusted && family_has_vision(base_url, model);
-    let thinking = if trusted {
-        ThinkingSupport::NoReplay
-    } else {
-        ThinkingSupport::None
-    };
     LlmCaps {
         native_tool_use: trusted,
         json_schema_mode: true,
@@ -128,7 +132,7 @@ pub fn infer_caps(base_url: &str, model: &str) -> LlmCaps {
         streaming: false,
         ctx_len: 128_000,
         prompt_cache: trusted,
-        thinking,
+        thinking: ThinkingSupport::NoReplay,
     }
 }
 
@@ -149,6 +153,7 @@ fn is_trusted_endpoint(base_url: &str, model: &str) -> bool {
             "x-ai/",
             "deepseek/",
             "moonshotai/kimi-k2",
+            "tencent/hy3-preview",
         ];
         return KNOWN_PREFIXES.iter().any(|p| model.starts_with(p));
     }
@@ -245,6 +250,15 @@ mod caps_tests {
     }
 
     #[test]
+    fn openrouter_tencent_hy3_preview_prefix_trusted() {
+        let c = infer_caps("https://openrouter.ai/api/v1", "tencent/hy3-preview:free");
+        assert!(c.native_tool_use);
+        assert!(!c.vision);
+        assert!(c.prompt_cache);
+        assert!(matches!(c.thinking, ThinkingSupport::NoReplay));
+    }
+
+    #[test]
     fn openrouter_unknown_prefix_conservative() {
         let c = infer_caps(
             "https://openrouter.ai/api/v1",
@@ -253,7 +267,7 @@ mod caps_tests {
         assert!(!c.vision);
         assert!(!c.prompt_cache);
         assert!(!c.native_tool_use);
-        assert!(matches!(c.thinking, ThinkingSupport::None));
+        assert!(matches!(c.thinking, ThinkingSupport::NoReplay));
     }
 
     #[test]
@@ -262,7 +276,7 @@ mod caps_tests {
         let c = infer_caps("http://127.0.0.1:11434/v1", "llama3");
         assert!(!c.vision);
         assert!(!c.prompt_cache);
-        assert!(matches!(c.thinking, ThinkingSupport::None));
+        assert!(matches!(c.thinking, ThinkingSupport::NoReplay));
         assert!(!c.native_tool_use);
         assert!(c.json_schema_mode);
     }
@@ -414,6 +428,7 @@ impl ModelAdapter for OpenAiAdapter {
 
         let finish_reason = choice.finish_reason.clone();
         let message = choice.message;
+        let thinking = thinking_artifacts_from_message(&message);
         let mut text = message_content_to_text(message.content);
         if text.trim().is_empty() {
             if let Some(refusal) = message.refusal {
@@ -496,10 +511,22 @@ impl ModelAdapter for OpenAiAdapter {
             ));
         }
 
+        let reported_thinking_tokens = parsed
+            .usage
+            .as_ref()
+            .and_then(|u| u.completion_tokens_details.as_ref())
+            .map(|d| d.reasoning_tokens)
+            .unwrap_or(0);
+        let thinking_tokens = if reported_thinking_tokens == 0 {
+            estimate_thinking_tokens(&thinking)
+        } else {
+            reported_thinking_tokens
+        };
+
         Ok(ModelReply {
             text,
             tool_calls,
-            thinking: vec![], // Chat Completions does not return replayable reasoning items
+            thinking,
             usage: TokenUsage {
                 prompt_tokens: parsed.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
                 completion_tokens: parsed
@@ -520,12 +547,7 @@ impl ModelAdapter for OpenAiAdapter {
                     .and_then(|u| u.prompt_tokens_details.as_ref())
                     .map(|d| d.cache_write_tokens)
                     .unwrap_or(0),
-                thinking_tokens: parsed
-                    .usage
-                    .as_ref()
-                    .and_then(|u| u.completion_tokens_details.as_ref())
-                    .map(|d| d.reasoning_tokens)
-                    .unwrap_or(0),
+                thinking_tokens,
             },
         })
     }
@@ -1463,6 +1485,10 @@ struct MessageOut {
     refusal: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallOut>>,
+    #[serde(default)]
+    reasoning: Option<Value>,
+    #[serde(default)]
+    reasoning_details: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -1502,6 +1528,58 @@ fn message_content_to_text(content: Option<Value>) -> String {
             .join("\n"),
         Some(other) => other.to_string(),
     }
+}
+
+fn thinking_artifacts_from_message(message: &MessageOut) -> Vec<ThinkingArtifact> {
+    let mut artifacts = Vec::new();
+    if let Some(text) = reasoning_value_to_text(message.reasoning.as_ref()) {
+        artifacts.push(ThinkingArtifact {
+            provider: "openai-chat".into(),
+            kind: ThinkingKind::FullText,
+            replay: ReplayPolicy::Never,
+            visibility: ThinkingVisibility::Hidden,
+            payload: ThinkingPayload::Text { text },
+            provider_signature: None,
+        });
+    }
+    if let Some(value) = non_empty_reasoning_details(message.reasoning_details.as_ref()) {
+        artifacts.push(ThinkingArtifact {
+            provider: "openai-chat".into(),
+            kind: ThinkingKind::ProviderOpaque,
+            replay: ReplayPolicy::Never,
+            visibility: ThinkingVisibility::Hidden,
+            payload: ThinkingPayload::Json {
+                value: value.clone(),
+            },
+            provider_signature: None,
+        });
+    }
+    artifacts
+}
+
+fn reasoning_value_to_text(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn non_empty_reasoning_details(value: Option<&Value>) -> Option<&Value> {
+    match value {
+        Some(Value::Array(items)) if !items.is_empty() => value,
+        Some(Value::Object(map)) if !map.is_empty() => value,
+        _ => None,
+    }
+}
+
+fn estimate_thinking_tokens(artifacts: &[ThinkingArtifact]) -> u32 {
+    artifacts.iter().fold(0u32, |acc, artifact| {
+        let tokens = match &artifact.payload {
+            ThinkingPayload::Text { text } => text.len().div_ceil(3) as u32,
+            _ => 0,
+        };
+        acc.saturating_add(tokens)
+    })
 }
 
 fn native_tool_arguments_to_value(arguments: Value) -> Result<Value, String> {
@@ -1598,6 +1676,43 @@ mod native_response_tests {
         ]));
 
         assert_eq!(message_content_to_text(content), "first\nsecond");
+    }
+
+    #[test]
+    fn captures_openrouter_reasoning_fields() {
+        let body = br##"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "OK",
+                    "reasoning": "short hidden reasoning",
+                    "reasoning_details": [{
+                        "type": "reasoning.text",
+                        "text": "short hidden reasoning"
+                    }]
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 10,
+                "completion_tokens_details": {"reasoning_tokens": 0}
+            }
+        }"##;
+
+        let parsed: OpenAiResponse = serde_json::from_slice(body).unwrap();
+        let artifacts = thinking_artifacts_from_message(&parsed.choices[0].message);
+
+        assert_eq!(artifacts.len(), 2);
+        assert!(estimate_thinking_tokens(&artifacts) > 0);
+        assert!(matches!(
+            &artifacts[0].payload,
+            ThinkingPayload::Text { .. }
+        ));
+        assert!(matches!(
+            &artifacts[1].payload,
+            ThinkingPayload::Json { .. }
+        ));
     }
 }
 

@@ -134,10 +134,37 @@ muagent exec resume --last --output-format stream-json "Continue."
 line so a host process can render streaming progress. See [USAGE.md](USAGE.md#stream-json-output)
 and [STREAM_JSON.md](STREAM_JSON.md) for the event schema.
 
+## Rust SDK
+
+Embed μAgent directly from Rust with `muagent::sdk`:
+
+```rust
+use muagent::sdk::{Agent, AgentEvent};
+
+let mut agent = Agent::builder()
+    .tools(["fs_read", "fs_list"])
+    .store("memory")
+    .build()
+    .await?;
+let output = agent
+    .query_with_events("Summarize this project.", |event| {
+        if let AgentEvent::AssistantText { text } = event {
+            print!("{text}");
+        }
+    })
+    .await?;
+println!("{}", output.final_text);
+```
+
+See [SDK.md](SDK.md) for tool/skill selection, `AGENT.md`/`CLAUDE.md`
+configuration, subagents exposed through the `spawn_sub_agent` tool, multi-agent
+`AgentTeam`, and session helpers.
+
 ## Documentation
 
 - [USAGE.md](USAGE.md): CLI modes, TUI commands, tools, skills, and session
   usage
+- [SDK.md](SDK.md): Rust SDK facade for embedding μAgent in another app
 - [STREAM_JSON.md](STREAM_JSON.md): NDJSON event schema for
   `muagent exec --output-format stream-json` (host integrations)
 - [CONFIG.md](CONFIG.md): provider defaults, config files, model capabilities,

@@ -8,6 +8,7 @@ pub mod core;
 pub mod oauth;
 pub mod providers;
 pub mod runtime;
+pub mod sdk;
 pub mod sessions;
 pub mod setup;
 pub mod storage;
@@ -23,6 +24,7 @@ pub mod prelude {
     pub use crate::capabilities::tools::register_defaults;
     pub use crate::core::prelude::*;
     pub use crate::runtime::{DefaultToolExecutor, DefaultToolSetProvider};
+    pub use crate::sdk::{Agent, AgentBuilder, AgentEvent, AgentResponse, AgentTeam, SdkError};
     pub use crate::sessions::{
         archive::{
             ArchiveConfig, ArchiveRotation, PartInfo, SessionArchive, SessionMeta, SummaryInfo,

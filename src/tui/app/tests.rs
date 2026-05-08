@@ -821,6 +821,37 @@ fn running_tool_call_updates_existing_row() {
 }
 
 #[test]
+fn subagent_tool_call_renders_as_long_running_agent_row() {
+    let mut app = app();
+    app.set_status("running");
+    app.add_tool_call_started("call_agent", "Subagent(reviewer: Check the patch)");
+
+    let running = render_text(&app, 120, 22);
+    assert!(
+        running.contains("⏺ Subagent(reviewer: Check the patch)"),
+        "{running}"
+    );
+
+    app.finish_tool_call(
+        "call_agent",
+        "Subagent(reviewer: Check the patch)",
+        true,
+        "approved",
+        Some("reviewer · 2 turns · 1 tool · result: approved".into()),
+    );
+    let finished = render_text(&app, 120, 22);
+    assert!(
+        finished.contains("⏺ Subagent(reviewer: Check the patch) ✓"),
+        "{finished}"
+    );
+    assert!(
+        finished.contains("reviewer · 2 turns · 1 tool · result: approved"),
+        "{finished}"
+    );
+    assert!(app.running_tools.is_empty());
+}
+
+#[test]
 fn running_tool_call_can_be_failed_without_tool_end() {
     let mut app = app();
     app.set_status("running");

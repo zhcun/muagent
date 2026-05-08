@@ -14,8 +14,10 @@
 
 use std::path::PathBuf;
 
+use crate::core::subagent::AgentDefinition;
 use crate::core::thinking::ThinkingSupport;
 
+mod agents;
 mod file;
 use file::{norm_key, FileConfig};
 
@@ -59,6 +61,7 @@ pub struct Config {
     pub mcp: McpConfig,
     pub runtime: RuntimeConfig,
     pub agent_instructions: AgentInstructionConfig,
+    pub subagents: SubagentConfig,
     pub store: StoreConfig,
 }
 
@@ -140,6 +143,12 @@ pub struct AgentInstructionConfig {
     pub max_bytes_per_file: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct SubagentConfig {
+    pub enabled: bool,
+    pub definitions: Vec<AgentDefinition>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThinkingModeCfg {
     Off,
@@ -179,6 +188,10 @@ pub struct ConfigOverrides {
     pub skill_denylist: Option<Vec<String>>,
     pub skill_autoload: Option<bool>,
     pub mcp_sse: Option<Vec<String>>,
+    pub agent_md: Option<bool>,
+    pub agent_md_max_bytes: Option<usize>,
+    pub subagents_enabled: Option<bool>,
+    pub subagents: Option<Vec<AgentDefinition>>,
     pub log: Option<String>,
 }
 
@@ -192,14 +205,16 @@ impl Config {
         let file_cfg = FileConfig::load(overrides.config_file.as_deref())?;
         file_cfg.warn_unknown_keys();
 
+        let fs = FsConfig::from_sources(&file_cfg, overrides);
         let cfg = Self {
             model: ModelConfig::from_sources(&file_cfg, overrides)?,
-            fs: FsConfig::from_sources(&file_cfg, overrides),
+            fs: fs.clone(),
             compaction: CompactionConfig::from_sources(&file_cfg, overrides)?,
             capabilities: CapabilityConfig::from_sources(&file_cfg, overrides)?,
             mcp: McpConfig::from_sources(&file_cfg, overrides),
             runtime: RuntimeConfig::from_sources(&file_cfg, overrides)?,
-            agent_instructions: AgentInstructionConfig::from_sources(&file_cfg)?,
+            agent_instructions: AgentInstructionConfig::from_sources(&file_cfg, overrides)?,
+            subagents: SubagentConfig::from_sources(&file_cfg, overrides, &fs.root)?,
             store: StoreConfig::from_sources(&file_cfg, overrides),
         };
         cfg.validate()?;
@@ -591,16 +606,20 @@ impl RuntimeConfig {
 }
 
 impl AgentInstructionConfig {
-    fn from_sources(file_cfg: &FileConfig) -> Result<Self, String> {
+    fn from_sources(file_cfg: &FileConfig, overrides: &ConfigOverrides) -> Result<Self, String> {
         Ok(Self {
-            enabled: parse_env_bool("MUAGENT_AGENT_MD")?
+            enabled: overrides
+                .agent_md
+                .or(parse_env_bool("MUAGENT_AGENT_MD")?)
                 .or(parse_file_bool(
                     file_cfg,
                     &["agent_md.enabled", "agent_md", "agent.md"],
                     "agent_md.enabled",
                 )?)
                 .unwrap_or(true),
-            max_bytes_per_file: parse_env_usize("MUAGENT_AGENT_MD_MAX_BYTES")?
+            max_bytes_per_file: overrides
+                .agent_md_max_bytes
+                .or(parse_env_usize("MUAGENT_AGENT_MD_MAX_BYTES")?)
                 .or(parse_file_usize(
                     file_cfg,
                     &["agent_md.max_bytes", "agent_md.max_bytes_per_file"],
@@ -609,6 +628,56 @@ impl AgentInstructionConfig {
                 .unwrap_or(64 * 1024),
         })
     }
+}
+
+impl SubagentConfig {
+    fn from_sources(
+        file_cfg: &FileConfig,
+        overrides: &ConfigOverrides,
+        root: &std::path::Path,
+    ) -> Result<Self, String> {
+        let enabled = overrides
+            .subagents_enabled
+            .or(parse_env_bool("MUAGENT_SUBAGENTS")?)
+            .or(parse_file_bool(
+                file_cfg,
+                &[
+                    "subagents.enabled",
+                    "subagents.enable",
+                    "subagent_tools.enabled",
+                    "agent_tool.enabled",
+                ],
+                "subagents.enabled",
+            )?)
+            .unwrap_or(true);
+
+        let mut definitions = if enabled {
+            agents::load_agent_definitions(root)
+        } else {
+            Vec::new()
+        };
+        if let Some(extra) = overrides.subagents.clone() {
+            definitions.extend(extra);
+        }
+
+        Ok(Self {
+            enabled,
+            definitions: validate_agent_definitions(definitions)?,
+        })
+    }
+}
+
+fn validate_agent_definitions(
+    definitions: Vec<AgentDefinition>,
+) -> Result<Vec<AgentDefinition>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for def in definitions {
+        if def.name.trim().is_empty() {
+            return Err("subagent name cannot be empty".into());
+        }
+        out.insert(def.name.clone(), def);
+    }
+    Ok(out.into_values().collect())
 }
 
 impl StoreConfig {
@@ -1314,6 +1383,29 @@ mod tests {
         assert_eq!(runtime.thinking_effort, Some(EffortCfg::High));
     }
 
+    #[test]
+    fn agent_md_overrides_win_over_file_config() {
+        let file_cfg = parse_config_text(
+            r#"
+            [agent_md]
+            enabled = true
+            max_bytes = 4096
+            "#,
+        )
+        .unwrap();
+        let cfg = super::AgentInstructionConfig::from_sources(
+            &file_cfg,
+            &ConfigOverrides {
+                agent_md: Some(false),
+                agent_md_max_bytes: Some(128),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.max_bytes_per_file, 128);
+    }
+
     fn valid_config_for_test() -> Config {
         Config {
             model: ModelConfig {
@@ -1354,6 +1446,10 @@ mod tests {
             agent_instructions: AgentInstructionConfig {
                 enabled: true,
                 max_bytes_per_file: 64 * 1024,
+            },
+            subagents: super::SubagentConfig {
+                enabled: true,
+                definitions: Vec::new(),
             },
             store: StoreConfig::Memory,
         }

@@ -17,6 +17,7 @@ use crate::storage::JsonlSessionStore;
 use crate::storage::MemorySessionStore;
 
 use crate::config::{Config, ModelCapabilityOverrides, ModelConfig, Provider, StoreConfig};
+use crate::runtime::subagent_tool::{SubagentExecutor, SubagentTool};
 
 pub struct Wired {
     pub runner: Arc<Runner>,
@@ -26,6 +27,13 @@ pub struct Wired {
 }
 
 pub async fn wire(cfg: &Config) -> Result<Wired, String> {
+    wire_with_hooks(cfg, None).await
+}
+
+pub async fn wire_with_hooks(
+    cfg: &Config,
+    hooks: Option<Arc<dyn HookDispatcher>>,
+) -> Result<Wired, String> {
     let model_net = Arc::new(ReqwestEgress::new().map_err(|e| format!("net init: {e:?}"))?);
     let model = build_model_adapter(&cfg.model, model_net.clone())?;
 
@@ -83,32 +91,6 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
         ),
     };
     let sessions = SessionManager::new(store.clone());
-
-    // Executor + provider (host-configured tool filters applied on BOTH sides
-    // so filtered tools never execute, even if the LLM hallucinates or
-    // replays a tool name from earlier history).
-    let mut executor_inner = DefaultToolExecutor::new(registry.clone());
-    if let Some(list) = cfg.capabilities.tool_allowlist.clone() {
-        executor_inner = executor_inner.with_tool_allowlist(list);
-    }
-    if !cfg.capabilities.tool_denylist.is_empty() {
-        executor_inner = executor_inner.with_tool_denylist(cfg.capabilities.tool_denylist.clone());
-    }
-    let executor = Arc::new(executor_inner);
-
-    let mut provider = DefaultToolSetProvider::new(registry).with_skills(skills.clone());
-    if let Some(list) = cfg.capabilities.tool_allowlist.clone() {
-        provider = provider.with_tool_allowlist(list);
-    }
-    if !cfg.capabilities.tool_denylist.is_empty() {
-        provider = provider.with_tool_denylist(cfg.capabilities.tool_denylist.clone());
-    }
-    if let Some(list) = cfg.capabilities.skill_allowlist.clone() {
-        provider = provider.with_skill_allowlist(list);
-    }
-    if !cfg.capabilities.skill_denylist.is_empty() {
-        provider = provider.with_skill_denylist(cfg.capabilities.skill_denylist.clone());
-    }
 
     // Compaction. Summarizer model is independent of the main agent model:
     // a smaller / cheaper model (haiku, mini, flash) does this prose
@@ -172,6 +154,64 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
     };
 
     let retry_policy = RetryPolicy::from_env()?;
+
+    if cfg.subagents.enabled && !cfg.subagents.definitions.is_empty() {
+        let executor = Arc::new(ConfiguredSubagentExecutor {
+            model_net: model_net.clone(),
+            base_model_config: cfg.model.clone(),
+            base_model: model.clone(),
+            registry: registry.clone(),
+            skills: skills.clone(),
+            hooks: hooks.clone(),
+            base_system: base_system.clone(),
+            compactor: compactor.clone(),
+            cache_policy,
+            thinking: thinking.clone(),
+            retry_policy,
+            workspace_root: workspace_root(cfg),
+            parent_tool_allowlist: cfg.capabilities.tool_allowlist.clone(),
+            parent_tool_denylist: cfg.capabilities.tool_denylist.clone(),
+            parent_skill_allowlist: cfg.capabilities.skill_allowlist.clone(),
+            parent_skill_denylist: cfg.capabilities.skill_denylist.clone(),
+        });
+        let tool = SubagentTool::new(cfg.subagents.definitions.clone(), executor);
+        if !tool.is_empty() {
+            registry.register(Arc::new(tool));
+        }
+    }
+
+    let effective_tool_allowlist = parent_tool_allowlist_with_subagents(
+        cfg.capabilities.tool_allowlist.clone(),
+        &cfg.capabilities.tool_denylist,
+        cfg.subagents.enabled && !cfg.subagents.definitions.is_empty(),
+    );
+
+    // Executor + provider (host-configured tool filters applied on BOTH sides
+    // so filtered tools never execute, even if the LLM hallucinates or
+    // replays a tool name from earlier history).
+    let mut executor_inner = DefaultToolExecutor::new(registry.clone());
+    if let Some(list) = effective_tool_allowlist.clone() {
+        executor_inner = executor_inner.with_tool_allowlist(list);
+    }
+    if !cfg.capabilities.tool_denylist.is_empty() {
+        executor_inner = executor_inner.with_tool_denylist(cfg.capabilities.tool_denylist.clone());
+    }
+    let executor = Arc::new(executor_inner);
+
+    let mut provider = DefaultToolSetProvider::new(registry.clone()).with_skills(skills.clone());
+    if let Some(list) = effective_tool_allowlist {
+        provider = provider.with_tool_allowlist(list);
+    }
+    if !cfg.capabilities.tool_denylist.is_empty() {
+        provider = provider.with_tool_denylist(cfg.capabilities.tool_denylist.clone());
+    }
+    if let Some(list) = cfg.capabilities.skill_allowlist.clone() {
+        provider = provider.with_skill_allowlist(list);
+    }
+    if !cfg.capabilities.skill_denylist.is_empty() {
+        provider = provider.with_skill_denylist(cfg.capabilities.skill_denylist.clone());
+    }
+
     tracing::info!(
         target: "muagent::setup",
         kind = "runtime_wired",
@@ -189,7 +229,7 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
         "runtime wired"
     );
 
-    let runner = Runner::builder()
+    let mut runner_builder = Runner::builder()
         .model(model)
         .tools(executor)
         .store(store)
@@ -199,7 +239,11 @@ pub async fn wire(cfg: &Config) -> Result<Wired, String> {
         .compactor(compactor)
         .cache_policy(cache_policy)
         .thinking(thinking)
-        .retry_policy(retry_policy)
+        .retry_policy(retry_policy);
+    if let Some(hooks) = hooks {
+        runner_builder = runner_builder.hooks(hooks);
+    }
+    let runner = runner_builder
         .build()
         .map_err(|e| format!("build runner: {e:?}"))?;
 
@@ -216,6 +260,425 @@ fn store_label(store: &StoreConfig) -> String {
         StoreConfig::Memory => "memory".into(),
         StoreConfig::Jsonl(path) => format!("jsonl:{}", path.display()),
     }
+}
+
+struct ConfiguredSubagentExecutor {
+    model_net: Arc<dyn crate::core::net::NetEgress>,
+    base_model_config: ModelConfig,
+    base_model: Arc<dyn ModelAdapter>,
+    registry: Arc<CapabilityRegistry>,
+    skills: Arc<SkillManager>,
+    hooks: Option<Arc<dyn HookDispatcher>>,
+    base_system: String,
+    compactor: Arc<dyn Compactor>,
+    cache_policy: CachePolicy,
+    thinking: ThinkingConfig,
+    retry_policy: RetryPolicy,
+    workspace_root: String,
+    parent_tool_allowlist: Option<Vec<String>>,
+    parent_tool_denylist: Vec<String>,
+    parent_skill_allowlist: Option<Vec<String>>,
+    parent_skill_denylist: Vec<String>,
+}
+
+#[async_trait::async_trait]
+impl SubagentExecutor for ConfiguredSubagentExecutor {
+    async fn invoke(
+        &self,
+        definition: AgentDefinition,
+        invocation: SubagentInvocation,
+        cancel: CancelToken,
+    ) -> Result<SubagentResult, String> {
+        let model = self.model_for(&definition)?;
+        let tool_allowlist = inherited_or_defined_allowlist(
+            definition.tools.clone(),
+            self.parent_tool_allowlist.clone(),
+            SUBAGENT_TOOL_NAME,
+        );
+        let tool_denylist =
+            inherited_denylist(self.parent_tool_denylist.clone(), SUBAGENT_TOOL_NAME);
+
+        let mut executor_inner = DefaultToolExecutor::new(self.registry.clone());
+        if let Some(list) = tool_allowlist.clone() {
+            executor_inner = executor_inner.with_tool_allowlist(list);
+        }
+        if !tool_denylist.is_empty() {
+            executor_inner = executor_inner.with_tool_denylist(tool_denylist.clone());
+        }
+
+        let mut provider =
+            DefaultToolSetProvider::new(self.registry.clone()).with_skills(self.skills.clone());
+        if let Some(list) = tool_allowlist {
+            provider = provider.with_tool_allowlist(list);
+        }
+        if !tool_denylist.is_empty() {
+            provider = provider.with_tool_denylist(tool_denylist);
+        }
+        let skill_allowlist = definition
+            .skills
+            .clone()
+            .or_else(|| self.parent_skill_allowlist.clone());
+        if let Some(list) = skill_allowlist {
+            provider = provider.with_skill_allowlist(list);
+        }
+        if !self.parent_skill_denylist.is_empty() {
+            provider = provider.with_skill_denylist(self.parent_skill_denylist.clone());
+        }
+
+        let mut runner_builder = Runner::builder()
+            .model(model)
+            .tools(Arc::new(executor_inner))
+            .store(Arc::new(MemorySessionStore::new()))
+            .tools_provider(provider)
+            .hook_model(
+                definition
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| self.base_model_config.model.clone()),
+            )
+            .base_system_prompt(subagent_system_prompt(&self.base_system, &definition))
+            .compactor(self.compactor.clone())
+            .cache_policy(self.cache_policy)
+            .thinking(self.thinking.clone())
+            .retry_policy(self.retry_policy)
+            .cancel_token(cancel.child());
+        if let Some(hooks) = &self.hooks {
+            runner_builder = runner_builder.hooks(hooks.clone());
+        }
+        let runner = runner_builder
+            .build()
+            .map_err(|e| format!("build subagent runner: {e}"))?;
+
+        let now = crate::core::clock::SystemClock.now_ms();
+        let mut state = RunState::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), now);
+        state.workspace_root = Some(self.workspace_root.clone());
+        state.parent_run_id = Some(invocation.parent_run_id);
+        runner
+            .submit_user_message(
+                &mut state,
+                Message::User {
+                    content: Content::text(invocation.task),
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let max_steps = definition
+            .max_steps
+            .unwrap_or(DEFAULT_SUBAGENT_MAX_STEPS)
+            .max(1);
+        for _ in 0..max_steps {
+            if state.step.is_terminal_or_paused() {
+                break;
+            }
+            runner.step(&mut state).await.map_err(|e| e.to_string())?;
+        }
+
+        match &state.step {
+            Step::Done { final_text } => Ok(SubagentResult {
+                agent_name: definition.name,
+                final_text: final_text.clone(),
+                run_id: state.run_id,
+                session_id: state.session_id,
+                usage: state.usage,
+            }),
+            Step::Failed { reason } => Err(format!("subagent failed: {reason}")),
+            Step::Paused { reason } => Err(format!("subagent paused: {reason:?}")),
+            step => Err(format!(
+                "subagent exceeded step budget {max_steps}; final step={step:?}"
+            )),
+        }
+    }
+}
+
+impl ConfiguredSubagentExecutor {
+    fn model_for(&self, definition: &AgentDefinition) -> Result<Arc<dyn ModelAdapter>, String> {
+        let Some(model) = definition.model.clone() else {
+            return Ok(self.base_model.clone());
+        };
+        let mut cfg = self.base_model_config.clone();
+        cfg.model = model;
+        build_model_adapter(&cfg, self.model_net.clone())
+    }
+}
+
+fn subagent_system_prompt(base_system: &str, definition: &AgentDefinition) -> String {
+    format!(
+        "{base_system}\n\nSubagent profile:\n- Name: {}\n- Description: {}\n\nSubagent instructions:\n{}",
+        definition.name,
+        if definition.description.trim().is_empty() {
+            "(none)"
+        } else {
+            definition.description.as_str()
+        },
+        definition.instructions
+    )
+}
+
+// Subagent nesting is intentionally unsupported: every subagent runner gets
+// the subagent delegation tool removed from its allowlist and added to its
+// denylist.
+fn inherited_or_defined_allowlist(
+    defined: Option<Vec<String>>,
+    inherited: Option<Vec<String>>,
+    remove_default: &str,
+) -> Option<Vec<String>> {
+    defined.or(inherited).map(|list| {
+        list.into_iter()
+            .filter(|name| name != remove_default)
+            .collect()
+    })
+}
+
+fn inherited_denylist(mut inherited: Vec<String>, deny_default: &str) -> Vec<String> {
+    if !inherited.iter().any(|name| name == deny_default) {
+        inherited.push(deny_default.to_string());
+    }
+    inherited
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+
+    use crate::core::error::RuntimeError;
+    use crate::core::net::{HttpReq, HttpResp, NetEgress, NetErr};
+    use crate::core::testing::{reply, CannedModel};
+
+    struct NeverNet;
+
+    #[async_trait]
+    impl NetEgress for NeverNet {
+        async fn http(&self, _req: HttpReq, _cancel: CancelToken) -> Result<HttpResp, NetErr> {
+            Err(NetErr::Denied(
+                "network should be unused in this test".into(),
+            ))
+        }
+    }
+
+    struct NoopCompactor;
+
+    #[async_trait]
+    impl Compactor for NoopCompactor {
+        async fn maybe_compact(
+            &self,
+            _state: &mut RunState,
+            _system_prompt: &str,
+            _cancel: CancelToken,
+        ) -> Result<Option<CompactionEvent>, RuntimeError> {
+            Ok(None)
+        }
+    }
+
+    struct SpyReadTool {
+        ran: Arc<AtomicBool>,
+        desc: ToolDescriptor,
+    }
+
+    impl SpyReadTool {
+        fn new(ran: Arc<AtomicBool>) -> Self {
+            Self {
+                ran,
+                desc: ToolDescriptor {
+                    name: "fs_read".into(),
+                    description: "test read tool".into(),
+                    schema_json: json!({"type":"object"}),
+                    timeout: std::time::Duration::from_secs(1),
+                    max_out_tokens: 128,
+                    concurrency: Concurrency::Parallel,
+                    side_effects: SideEffects::ReadOnly,
+                    idempotency: Idempotency::Idempotent,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for SpyReadTool {
+        fn descriptor(&self) -> &ToolDescriptor {
+            &self.desc
+        }
+
+        async fn run(
+            &self,
+            _args: Value,
+            _ctx: &ToolContext,
+            _cancel: CancelToken,
+        ) -> Result<ToolOk, ToolErr> {
+            self.ran.store(true, Ordering::SeqCst);
+            Ok(ToolOk::text("DXB-442"))
+        }
+    }
+
+    #[derive(Default)]
+    struct DenyFsReadHook {
+        saw_fs_read: AtomicBool,
+    }
+
+    #[async_trait]
+    impl HookDispatcher for DenyFsReadHook {
+        async fn dispatch(&self, input: HookInput, _cancel: CancelToken) -> HookOutput {
+            if input.hook_event_name == HookEventName::PreToolUse
+                && input.tool_name.as_deref() == Some("fs_read")
+            {
+                self.saw_fs_read.store(true, Ordering::SeqCst);
+                return HookOutput {
+                    hook_specific_output: Some(HookSpecificOutput::PreToolUse {
+                        permission_decision: Some(HookPermissionDecision::Deny),
+                        permission_decision_reason: Some("blocked in subagent".into()),
+                    }),
+                    ..Default::default()
+                };
+            }
+            HookOutput::default()
+        }
+    }
+
+    #[test]
+    fn subagent_allowlist_removes_delegation_tool_even_when_defined() {
+        let allowlist = inherited_or_defined_allowlist(
+            Some(vec![
+                "fs_read".to_string(),
+                SUBAGENT_TOOL_NAME.to_string(),
+                "fs_list".to_string(),
+            ]),
+            Some(vec!["sh_exec".to_string()]),
+            SUBAGENT_TOOL_NAME,
+        )
+        .unwrap();
+
+        assert_eq!(allowlist, vec!["fs_read", "fs_list"]);
+    }
+
+    #[test]
+    fn subagent_allowlist_removes_delegation_tool_when_inherited() {
+        let allowlist = inherited_or_defined_allowlist(
+            None,
+            Some(vec![
+                "fs_read".to_string(),
+                SUBAGENT_TOOL_NAME.to_string(),
+                "fs_list".to_string(),
+            ]),
+            SUBAGENT_TOOL_NAME,
+        )
+        .unwrap();
+
+        assert_eq!(allowlist, vec!["fs_read", "fs_list"]);
+    }
+
+    #[test]
+    fn subagent_denylist_always_denies_delegation_tool() {
+        let denylist = inherited_denylist(vec!["sh_exec".to_string()], SUBAGENT_TOOL_NAME);
+
+        assert!(denylist.iter().any(|name| name == "sh_exec"));
+        assert!(denylist.iter().any(|name| name == SUBAGENT_TOOL_NAME));
+    }
+
+    #[test]
+    fn empty_parent_allowlist_stays_empty_even_with_subagents() {
+        let allowlist = parent_tool_allowlist_with_subagents(Some(Vec::new()), &[], true).unwrap();
+
+        assert!(allowlist.is_empty());
+    }
+
+    #[test]
+    fn non_empty_parent_allowlist_gets_subagent_tool() {
+        let allowlist =
+            parent_tool_allowlist_with_subagents(Some(vec!["fs_read".into()]), &[], true).unwrap();
+
+        assert_eq!(allowlist, vec!["fs_read", SUBAGENT_TOOL_NAME]);
+    }
+
+    #[tokio::test]
+    async fn subagent_runner_inherits_hooks_for_internal_tools() {
+        let tool_ran = Arc::new(AtomicBool::new(false));
+        let registry = Arc::new(CapabilityRegistry::new());
+        registry.register(Arc::new(SpyReadTool::new(tool_ran.clone())));
+        let hooks = Arc::new(DenyFsReadHook::default());
+        let executor = ConfiguredSubagentExecutor {
+            model_net: Arc::new(NeverNet),
+            base_model_config: ModelConfig {
+                provider: Provider::OpenAi,
+                base_url: "https://example.invalid".into(),
+                model: "test-model".into(),
+                api_key: Some("test".into()),
+                capabilities: ModelCapabilityOverrides::default(),
+            },
+            base_model: Arc::new(CannedModel::new(vec![
+                reply::with_calls(
+                    "read",
+                    vec![PendingCall::new("read_contacts", "fs_read", json!({}))],
+                ),
+                reply::text("done"),
+            ])),
+            registry,
+            skills: Arc::new(SkillManager::new()),
+            hooks: Some(hooks.clone()),
+            base_system: "base".into(),
+            compactor: Arc::new(NoopCompactor),
+            cache_policy: CachePolicy::Disabled,
+            thinking: ThinkingConfig::default(),
+            retry_policy: RetryPolicy::default(),
+            workspace_root: ".".into(),
+            parent_tool_allowlist: Some(vec!["fs_read".into(), SUBAGENT_TOOL_NAME.into()]),
+            parent_tool_denylist: Vec::new(),
+            parent_skill_allowlist: None,
+            parent_skill_denylist: Vec::new(),
+        };
+
+        let result = executor
+            .invoke(
+                AgentDefinition::new("reviewer", "review", "check").tools(["fs_read"]),
+                SubagentInvocation {
+                    agent_name: "reviewer".into(),
+                    task: "read contacts".into(),
+                    parent_run_id: uuid::Uuid::new_v4(),
+                    parent_session_id: uuid::Uuid::new_v4(),
+                    parent_call_id: None,
+                },
+                CancelToken::never(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.final_text, "done");
+        assert!(hooks.saw_fs_read.load(Ordering::SeqCst));
+        assert!(!tool_ran.load(Ordering::SeqCst));
+    }
+}
+
+fn parent_tool_allowlist_with_subagents(
+    allowlist: Option<Vec<String>>,
+    denylist: &[String],
+    has_subagents: bool,
+) -> Option<Vec<String>> {
+    let Some(mut allowlist) = allowlist else {
+        return None;
+    };
+    if allowlist.is_empty() {
+        return Some(allowlist);
+    }
+    if has_subagents
+        && !denylist.iter().any(|name| name == SUBAGENT_TOOL_NAME)
+        && !allowlist.iter().any(|name| name == SUBAGENT_TOOL_NAME)
+    {
+        allowlist.push(SUBAGENT_TOOL_NAME.to_string());
+    }
+    Some(allowlist)
+}
+
+fn workspace_root(config: &Config) -> String {
+    config
+        .fs
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| config.fs.root.clone())
+        .display()
+        .to_string()
 }
 
 const DEFAULT_SYSTEM_PROMPT_L0: &str = include_str!("prompts/default-system.md");

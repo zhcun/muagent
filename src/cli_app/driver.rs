@@ -98,13 +98,9 @@ pub async fn run_one_shot_stream_json(
         emitter.emit_error(&msg, "submit");
         return Err(msg);
     }
-    if let Err(e) = drive_until_terminal_with_updates_and_emitter(
-        runner,
-        state,
-        None,
-        Some(emitter.clone()),
-    )
-    .await
+    if let Err(e) =
+        drive_until_terminal_with_updates_and_emitter(runner, state, None, Some(emitter.clone()))
+            .await
     {
         emitter.emit_error(&e, "step");
         return Err(e);

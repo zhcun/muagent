@@ -1,5 +1,6 @@
 pub mod executor;
 pub mod provider;
+pub mod subagent_tool;
 
 pub mod token_estimate {
     pub use crate::sessions::token_estimate::*;
@@ -7,9 +8,10 @@ pub mod token_estimate {
 
 pub use executor::DefaultToolExecutor;
 pub use provider::DefaultToolSetProvider;
+pub use subagent_tool::{SubagentExecutor, SubagentTool};
 
 pub mod prelude {
-    pub use super::{DefaultToolExecutor, DefaultToolSetProvider};
+    pub use super::{DefaultToolExecutor, DefaultToolSetProvider, SubagentExecutor, SubagentTool};
     pub use crate::adapters::{AdapterBundle, FileSystem, ProcessExec, Root, Uri};
     pub use crate::capabilities::skills::{
         loader::{FilesystemSkill, FilesystemSkillLoader},
