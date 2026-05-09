@@ -4,7 +4,6 @@
 //! `Runner` FSM with a host-friendly `Agent` API while leaving core traits,
 //! state transitions, and persistence semantics unchanged.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -60,9 +59,6 @@ pub enum SdkError {
 
     #[error("{0} is unavailable on an Agent built from raw parts")]
     Unavailable(&'static str),
-
-    #[error("unknown agent: {0}")]
-    UnknownAgent(String),
 }
 
 /// Events emitted by the SDK facade while a query is running.
@@ -361,77 +357,6 @@ pub struct Agent {
     state: RunState,
     wired: Option<setup::Wired>,
     max_steps: usize,
-}
-
-/// Small host-driven multi-agent container.
-///
-/// This intentionally does not invent a planner/worker protocol. It gives
-/// SDK callers a typed place to hold multiple independent `Agent`s and route
-/// work between them using application policy.
-#[derive(Default)]
-pub struct AgentTeam {
-    agents: BTreeMap<String, Agent>,
-}
-
-impl AgentTeam {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_agent(mut self, name: impl Into<String>, agent: Agent) -> Self {
-        self.insert(name, agent);
-        self
-    }
-
-    pub fn insert(&mut self, name: impl Into<String>, agent: Agent) -> Option<Agent> {
-        self.agents.insert(name.into(), agent)
-    }
-
-    pub fn remove(&mut self, name: &str) -> Option<Agent> {
-        self.agents.remove(name)
-    }
-
-    pub fn contains(&self, name: &str) -> bool {
-        self.agents.contains_key(name)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.agents.keys().map(String::as_str)
-    }
-
-    pub fn agent(&self, name: &str) -> Option<&Agent> {
-        self.agents.get(name)
-    }
-
-    pub fn agent_mut(&mut self, name: &str) -> Option<&mut Agent> {
-        self.agents.get_mut(name)
-    }
-
-    pub async fn query(
-        &mut self,
-        name: &str,
-        prompt: impl Into<String>,
-    ) -> Result<AgentResponse, SdkError> {
-        self.agent_mut(name)
-            .ok_or_else(|| SdkError::UnknownAgent(name.to_string()))?
-            .query(prompt)
-            .await
-    }
-
-    pub async fn query_with_events<F>(
-        &mut self,
-        name: &str,
-        prompt: impl Into<String>,
-        on_event: F,
-    ) -> Result<AgentResponse, SdkError>
-    where
-        F: FnMut(AgentEvent) + Send,
-    {
-        self.agent_mut(name)
-            .ok_or_else(|| SdkError::UnknownAgent(name.to_string()))?
-            .query_with_events(prompt, on_event)
-            .await
-    }
 }
 
 impl Agent {
@@ -983,31 +908,6 @@ mod tests {
             .any(|e| matches!(e, AgentEvent::SessionStarted { resumed: false, .. })));
         assert!(response.events.iter().any(
             |e| matches!(e, AgentEvent::Result { final_text, .. } if final_text == "hello from sdk")
-        ));
-    }
-
-    #[tokio::test]
-    async fn agent_team_routes_queries_by_name() {
-        let researcher = test_agent(Arc::new(CannedModel::new(vec![reply::text("research")])));
-        let reviewer = test_agent(Arc::new(CannedModel::new(vec![reply::text("review")])));
-        let mut team = AgentTeam::new()
-            .with_agent("researcher", researcher)
-            .with_agent("reviewer", reviewer);
-
-        assert_eq!(
-            team.names().collect::<Vec<_>>(),
-            vec!["researcher", "reviewer"]
-        );
-        assert_eq!(
-            team.query("reviewer", "check this")
-                .await
-                .unwrap()
-                .final_text,
-            "review"
-        );
-        assert!(matches!(
-            team.query("missing", "hi").await.unwrap_err(),
-            SdkError::UnknownAgent(name) if name == "missing"
         ));
     }
 

@@ -157,8 +157,10 @@ println!("{}", output.final_text);
 ```
 
 See [SDK.md](SDK.md) for tool/skill selection, `AGENT.md`/`CLAUDE.md`
-configuration, subagents exposed through the `spawn_sub_agent` tool, multi-agent
-`AgentTeam`, and session helpers.
+configuration, subagents exposed through the `spawn_sub_agent` tool, and
+session helpers. The hierarchical multi-agent layer (orchestrator + workers
+in subprocesses, file-based status) is described in
+[team/DESIGN.md](team/DESIGN.md).
 
 ## Documentation
 

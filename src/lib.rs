@@ -24,7 +24,7 @@ pub mod prelude {
     pub use crate::capabilities::tools::register_defaults;
     pub use crate::core::prelude::*;
     pub use crate::runtime::{DefaultToolExecutor, DefaultToolSetProvider};
-    pub use crate::sdk::{Agent, AgentBuilder, AgentEvent, AgentResponse, AgentTeam, SdkError};
+    pub use crate::sdk::{Agent, AgentBuilder, AgentEvent, AgentResponse, SdkError};
     pub use crate::sessions::{
         archive::{
             ArchiveConfig, ArchiveRotation, PartInfo, SessionArchive, SessionMeta, SummaryInfo,

@@ -178,41 +178,16 @@ agent can run at most 8 subagent calls concurrently.
 
 ## Multiple Agents
 
-`AgentTeam` is a small host-driven container for coordinating multiple
-independent agents:
+The SDK does not provide a built-in multi-agent container. If a host wants to
+coordinate several `Agent` instances itself, hold them as ordinary Rust values
+and call `agent.query(...)` directly — each `Agent` retains its own session
+state across calls.
 
-```rust
-use muagent::sdk::{Agent, AgentTeam};
-
-let researcher = Agent::builder()
-    .tools(["fs_read", "fs_list"])
-    .store("memory")
-    .build()
-    .await?;
-let reviewer = Agent::builder()
-    .tools(["fs_read"])
-    .agent_md(true)
-    .store("memory")
-    .build()
-    .await?;
-
-let mut team = AgentTeam::new()
-    .with_agent("researcher", researcher)
-    .with_agent("reviewer", reviewer);
-
-let notes = team.query("researcher", "Inspect the repository.").await?;
-let review = team
-    .query("reviewer", format!("Review these notes:\n{}", notes.final_text))
-    .await?;
-let follow_up = team
-    .query("researcher", "Now continue from your previous findings.")
-    .await?;
-```
-
-The SDK deliberately keeps orchestration policy in the host application: you
-decide which agent runs first, how outputs are summarized, and whether agents
-share a store/root/config. Repeated calls to the same team member continue that
-agent's own conversation state; other team members keep separate histories.
+For LLM-driven multi-agent setups (one agent spawns and supervises others as
+subprocesses, with file-based status), see
+[team/DESIGN.md](team/DESIGN.md). That layer exposes two opt-in tools
+(`worker_admin`, `agent_msg`) so the orchestrator's model decides who works,
+not the host program.
 
 For advanced hosts that wire their own `ModelAdapter`, `ToolExecutor`, or
 `SessionStore`, use `Agent::from_parts(runner, state)` and keep using core

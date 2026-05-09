@@ -7,7 +7,7 @@ use std::sync::Arc;
 use muagent::adapters::linux::{LinuxFileSystem, LinuxProcessExec};
 use muagent::core::prelude::*;
 use muagent::core::testing::{reply, CannedModel};
-use muagent::prelude::{register_defaults, AdapterBundle, Agent, AgentEvent, AgentTeam};
+use muagent::prelude::{register_defaults, AdapterBundle, Agent, AgentEvent};
 use muagent::runtime::{
     DefaultToolExecutor, DefaultToolSetProvider, SubagentExecutor, SubagentTool,
 };
@@ -500,41 +500,29 @@ async fn sdk_team_runs_multi_turn_handoff_case() {
         reply::text("approved: DXB-442"),
     ];
 
-    let researcher = sdk_agent(tmp.path(), researcher_replies, Some(vec!["fs_read".into()]));
-    let reviewer = sdk_agent(tmp.path(), reviewer_replies, Some(vec!["fs_read".into()]));
-    let mut team = AgentTeam::new()
-        .with_agent("researcher", researcher)
-        .with_agent("reviewer", reviewer);
+    let mut researcher = sdk_agent(tmp.path(), researcher_replies, Some(vec!["fs_read".into()]));
+    let mut reviewer = sdk_agent(tmp.path(), reviewer_replies, Some(vec!["fs_read".into()]));
 
     let mut route_trace = Vec::new();
-    let first = team
-        .query(
-            "researcher",
-            format!(
-                "Find the entry for `Nina Patel` in {}. Return only its `code` value.",
-                file_uri(&contacts_path)
-            ),
-        )
+    let first = researcher
+        .query(format!(
+            "Find the entry for `Nina Patel` in {}. Return only its `code` value.",
+            file_uri(&contacts_path)
+        ))
         .await
         .expect("researcher first turn");
     route_trace.push("researcher:first");
-    let review = team
-        .query(
-            "reviewer",
-            format!(
-                "Verify this researcher result for Nina Patel's code by reading {}: `{}`. Return `approved: CODE` if it is correct.",
-                file_uri(&contacts_path),
-                first.final_text
-            ),
-        )
+    let review = reviewer
+        .query(format!(
+            "Verify this researcher result for Nina Patel's code by reading {}: `{}`. Return `approved: CODE` if it is correct.",
+            file_uri(&contacts_path),
+            first.final_text
+        ))
         .await
         .expect("reviewer turn");
     route_trace.push("reviewer");
-    let second = team
-        .query(
-            "researcher",
-            "Now return only the same entry's city value in lowercase.",
-        )
+    let second = researcher
+        .query("Now return only the same entry's city value in lowercase.")
         .await
         .expect("researcher second turn");
     route_trace.push("researcher:second");
@@ -552,8 +540,7 @@ async fn sdk_team_runs_multi_turn_handoff_case() {
     assert_successful_tool_used(&first, "fs_read");
     assert_successful_tool_used(&review, "fs_read");
     assert_eq!(
-        team.agent("researcher")
-            .unwrap()
+        researcher
             .state()
             .history
             .iter()
@@ -562,8 +549,7 @@ async fn sdk_team_runs_multi_turn_handoff_case() {
         2
     );
     assert_eq!(
-        team.agent("reviewer")
-            .unwrap()
+        reviewer
             .state()
             .history
             .iter()
@@ -783,41 +769,29 @@ async fn sdk_live_openrouter_gpt54nano_runs_team_multi_turn_handoff_case() {
     let contacts_path = tmp.path().join("contacts.json");
     write_contacts_fixture(&contacts_path);
 
-    let researcher = live_openrouter_agent(tmp.path(), 100, &["fs_read"]).await;
-    let reviewer = live_openrouter_agent(tmp.path(), 100, &["fs_read"]).await;
-    let mut team = AgentTeam::new()
-        .with_agent("researcher", researcher)
-        .with_agent("reviewer", reviewer);
+    let mut researcher = live_openrouter_agent(tmp.path(), 100, &["fs_read"]).await;
+    let mut reviewer = live_openrouter_agent(tmp.path(), 100, &["fs_read"]).await;
 
     let mut route_trace = Vec::new();
-    let first = team
-        .query(
-            "researcher",
-            format!(
-                "Find the entry for `Nina Patel` in {}. Return only its `code` value.",
-                file_uri(&contacts_path)
-            ),
-        )
+    let first = researcher
+        .query(format!(
+            "Find the entry for `Nina Patel` in {}. Return only its `code` value.",
+            file_uri(&contacts_path)
+        ))
         .await
         .expect("live team researcher first turn");
     route_trace.push("researcher:first");
-    let review = team
-        .query(
-            "reviewer",
-            format!(
-                "Do not trust the provided answer; check {}. A researcher returned `{}` as Nina Patel's code. Return only `approved` if the file confirms that exact code, otherwise return only `rejected`.",
-                file_uri(&contacts_path),
-                first.final_text.trim()
-            ),
-        )
+    let review = reviewer
+        .query(format!(
+            "Do not trust the provided answer; check {}. A researcher returned `{}` as Nina Patel's code. Return only `approved` if the file confirms that exact code, otherwise return only `rejected`.",
+            file_uri(&contacts_path),
+            first.final_text.trim()
+        ))
         .await
         .expect("live team reviewer turn");
     route_trace.push("reviewer");
-    let second = team
-        .query(
-            "researcher",
-            "Now return only the same entry's city value in lowercase.",
-        )
+    let second = researcher
+        .query("Now return only the same entry's city value in lowercase.")
         .await
         .expect("live team researcher second turn");
     route_trace.push("researcher:second");
@@ -843,8 +817,7 @@ async fn sdk_live_openrouter_gpt54nano_runs_team_multi_turn_handoff_case() {
     assert_successful_tool_used(&first, "fs_read");
     assert_successful_tool_used(&review, "fs_read");
     assert!(
-        team.agent("researcher")
-            .unwrap()
+        researcher
             .state()
             .history
             .iter()
@@ -853,8 +826,7 @@ async fn sdk_live_openrouter_gpt54nano_runs_team_multi_turn_handoff_case() {
             >= 2
     );
     assert!(
-        team.agent("reviewer")
-            .unwrap()
+        reviewer
             .state()
             .history
             .iter()
